@@ -1,0 +1,29 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Build / packaging output
+build/
+dist/*
+!dist/cs2py.exe
+dist.zip
+*.spec
+
+# Runtime state (user config + offsets-update marker)
+settings.json
+.offsets_sha
+backup_old_version/
+
+# Local pyMeow wheel (install from upstream instead of committing the binary)
+pyMeow-1.73.42.zip
+pyMeow-1.73.42/
+
+# IDE / OS junk
+.vscode/
+.idea/
+*.log
+Thumbs.db
+.DS_Store
+
+# Internal working notes (not part of the project)
+CS2PY_PROJECT_HANDOFF.md
