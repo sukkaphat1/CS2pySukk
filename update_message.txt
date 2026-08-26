@@ -1,0 +1,2 @@
+A new cs2py.exe is required! Please download the latest version from:
+https://github.com/sukkaphat1/CS2pySukk/releases

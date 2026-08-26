@@ -135,6 +135,16 @@ def _version_tuple(v):
 		return ()
 
 
+def _remote_message():
+	"""Fetch the optional announcement the dev wrote in update_message.txt."""
+	try:
+		r = requests.get(f'{RAW_BASE}/update_message.txt', timeout=6)
+		r.raise_for_status()
+		return r.text.strip()
+	except Exception:
+		return None
+
+
 def check_version():
 	"""Print the local version and whether a newer one is on GitHub. Best-effort."""
 	local = _local_version()
@@ -147,7 +157,11 @@ def check_version():
 		print(f'Version check failed: {e}')
 		return
 	if _version_tuple(remote) > _version_tuple(local or ''):
-		print(f'New version available: {remote} - https://github.com/{REMOTE_REPO}/releases')
+		msg = _remote_message()
+		if msg:
+			print(msg)
+		else:
+			print(f'New version available: {remote} - https://github.com/{REMOTE_REPO}/releases')
 	else:
 		print('You are up to date')
 
