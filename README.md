@@ -1,5 +1,7 @@
 ![CS2PY](https://raw.githubusercontent.com/sukkaphat1/CS2pySukk/main/img/cs2py_banner.png)
 
+> Forked from [GsDeluxe/cs2py](https://github.com/GsDeluxe/cs2py)
+
 ## About
 
 **cs2py** is an external Counter-Strike 2 cheat written in Python. It reads game memory to draw a raylib overlay (ESP) and automates an aimbot, triggerbot, recoil control, anti-flash, bunnyhop, FOV changer, bomb timer, and Discord Rich Presence. A DearPyGui menu handles all settings. On launch it pulls the latest game offsets from this repo, so it keeps working after CS2 updates without a rebuild.

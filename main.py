@@ -79,7 +79,7 @@ def LoadConfig():
 
 if __name__ == "__main__":
 
-	print("          ____              \n  ___ ___|___ \\ _ __  _   _ \n / __/ __| __) | '_ \\| | | |\n| (__\\__ \\/ __/| |_) | |_| |\n \\___|___/_____| .__/ \\__, |\n               |_|    |___/ \n\n             - By Sukkaphat1")
+	print("          ____              \n  ___ ___|___ \\ _ __  _   _ \n / __/ __| __) | '_ \\| | | |\n| (__\\__ \\/ __/| |_) | |_| |\n \\___|___/_____| .__/ \\__, |\n               |_|    |___/ \n\n             - By Sukkaphat1 (Forked from GsDeluxe)")
 
 	win32process.SetPriorityClass(win32api.OpenProcess(win32con.PROCESS_ALL_ACCESS, True, win32api.GetCurrentProcessId()), win32process.HIGH_PRIORITY_CLASS)
 	multiprocessing.freeze_support()
