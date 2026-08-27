@@ -18,7 +18,6 @@ def Triggerbot_AntiFlash_Update(processHandle, clientBaseAddress, Offsets, Optio
 	try:
 		if Options["EnableAntiFlashbang"]:
 			memfuncs.ProcMemHandler.WriteFloat(processHandle, localPlayer + Offsets.offset.m_flFlashMaxAlpha, 0.0)
-			return
 		else:
 			memfuncs.ProcMemHandler.WriteFloat(processHandle, localPlayer + Offsets.offset.m_flFlashMaxAlpha, 255.0)
 
