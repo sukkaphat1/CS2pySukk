@@ -80,17 +80,15 @@ def GetPlayers(processHandle, clientBaseAddress, LocalPlayer, AimBoneID, Options
 	return entities
 
 def ResolveBoneToID(selectedIndex):
-	match selectedIndex:
-		case 0:
-			return PLAYER_BONES["head"]
-		case 1:
-			return PLAYER_BONES["seck_0"]
-		case 2:
-			return PLAYER_BONES["spine_2"]
-		case 3:
-			return PLAYER_BONES["leg_lower_L"]
-		case _:
-			return PLAYER_BONES["head"]
+	# selectedIndex is the combo string: "Head", "Neck", "Torso", or "Leg"
+	if selectedIndex == "Neck":
+		return PLAYER_BONES["neck_0"]
+	elif selectedIndex == "Torso":
+		return PLAYER_BONES["spine_2"]
+	elif selectedIndex == "Leg":
+		return PLAYER_BONES["leg_lower_L"]
+	else:  # "Head" (and anything unrecognized) -> head
+		return PLAYER_BONES["head"]
 
 
 _last_update_time = time.perf_counter()
