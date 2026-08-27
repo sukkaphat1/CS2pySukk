@@ -32,6 +32,7 @@ CHEAT_SETTINGS = {
     "EnableTriggerbotKeyCheck": True,
     "TriggerbotKey": 17,
     "EnableTriggerbotTeamCheck": False,
+    "TriggerbotTapInterval": 0.0,
 
     "EnableESPDistanceRendering": True,
     "EnableESPTeamCheck": False,

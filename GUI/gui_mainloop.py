@@ -570,6 +570,7 @@ class CS2PY_GUI:
 					dpg.add_checkbox(label="Enable Trigger Bot", default_value=self.config["EnableTriggerbot"], callback=lambda s, d: self.config.update({"EnableTriggerbot": d}))
 					dpg.add_checkbox(label="Team Check##Triggerbot", default_value=self.config["EnableTriggerbotTeamCheck"], callback=lambda s, d: self.config.update({"EnableTriggerbotTeamCheck": d}))
 					dpg.add_checkbox(label="Key Check", default_value=self.config["EnableTriggerbotKeyCheck"], callback=lambda s, d: self.config.update({"EnableTriggerbotKeyCheck": d}))
+					dpg.add_slider_float(label="Tap Fire Interval", default_value=float(self.config.get("TriggerbotTapInterval", 0.0)), min_value=0.0, max_value=2.0, format="%.1f", callback=lambda s, d: self.config.update({"TriggerbotTapInterval": round(float(d), 1)}))
 					dpg.add_text("Triggerbot HotKey")
 					dpg.add_button(label=KeyNames[self.config["TriggerbotKey"]] if self.config["TriggerbotKey"] < len(KeyNames) else f"Unknown({self.config['TriggerbotKey']})", user_data="TriggerbotKey", callback=self.keybind_use)
 

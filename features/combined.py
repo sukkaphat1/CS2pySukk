@@ -6,8 +6,12 @@ from functions import gameinput
 
 import globals
 import win32api, win32gui
+import time
+
+_last_tap_time = 0.0
 
 def Triggerbot_AntiFlash_Update(processHandle, clientBaseAddress, Offsets, Options):
+	global _last_tap_time
 	localPlayer = memfuncs.ProcMemHandler.ReadPointer(processHandle, clientBaseAddress + Offsets.offset.dwLocalPlayerPawn)
 	if (not localPlayer): return
 
@@ -31,7 +35,14 @@ def Triggerbot_AntiFlash_Update(processHandle, clientBaseAddress, Offsets, Optio
 				if not Options["EnableTriggerbotTeamCheck"] or TargetEntityTeam != localPlayerTeam:
 					TargetEntityHP = memfuncs.ProcMemHandler.ReadInt(processHandle, TargetEntity + Offsets.offset.m_iHealth)
 					if (TargetEntityHP > 0):
-						if not win32api.GetAsyncKeyState(0x01):
-							gameinput.LeftClick()
+						interval = float(Options.get("TriggerbotTapInterval", 0.0))
+						if interval <= 0.0:
+							if not win32api.GetAsyncKeyState(0x01):
+								gameinput.LeftClick()
+						else:
+							now = time.monotonic()
+							if (now - _last_tap_time) >= interval and not win32api.GetAsyncKeyState(0x01):
+								gameinput.LeftClick()
+								_last_tap_time = now
 	except:
 		pass
