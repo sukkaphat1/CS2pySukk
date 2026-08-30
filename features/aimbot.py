@@ -149,9 +149,9 @@ def Aimbot_Update(processHandle, clientBaseAddress, Offsets, Options, ARDUINO_HA
 				if Options["EnableAimbotTeamCheck"] and team == localTeam:
 					continue
 
-				if Options["EnableAimbotVisibilityCheck"]:
-					spotted = memfuncs.ProcMemHandler.ReadInt(processHandle, pawn + Offsets.offset.m_entitySpottedState + Offsets.offset.m_bSpotted)
-					if not spotted:
+				if Options["EnableAimbotVisibilityCheck"] and localIndex > 0:
+					spotted_mask = memfuncs.ProcMemHandler.ReadInt(processHandle, pawn + Offsets.offset.m_entitySpottedState + Offsets.offset.m_bSpottedByMask)
+					if not (spotted_mask & (1 << (localIndex - 1))):
 						continue
 
 				sceneNode = memfuncs.ProcMemHandler.ReadPointer(processHandle, pawn + Offsets.offset.m_pGameSceneNode)
