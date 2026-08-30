@@ -22,6 +22,7 @@ import serial.tools.list_ports
 
 import win32con, win32process, win32api
 import keyboard, os, json
+import time
 
 keyboard.add_hotkey("end", callback=lambda: os._exit(0))
 keyboard.add_hotkey("insert", callback=lambda: gui_util.hide_dpg())
@@ -65,7 +66,14 @@ class ManagedConfig:
 	def __repr__(self):
 		return repr(self._dict)
 
+_save_ts = 0.0
+
 def SaveConfig(options):
+	global _save_ts
+	now = time.monotonic()
+	if now - _save_ts < 0.5:
+		return
+	_save_ts = now
 	with open(globals.SAVE_FILE, 'w') as fp:
 		json.dump(dict(options), fp, indent=4)
 
@@ -130,13 +138,15 @@ if __name__ == "__main__":
 	discord_rpc_proc.start()
 
 	while esp.pme.overlay_loop():
-		esp.ESP_Update(ProcessObject, ClientModuleAddress, SharedOptions, SharedOffsets, SharedBombState)
+		Options = dict(SharedOptions)
 
-		if SharedOptions["EnableAimbot"] and win32api.GetAsyncKeyState(SharedOptions["AimbotKey"]) & 0x8000:
-			aimbot.Aimbot_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions, ARDUINO_HANDLE=ARDUINO_HANDLE)
+		esp.ESP_Update(ProcessObject, ClientModuleAddress, Options, SharedOffsets, SharedBombState)
 
-		if SharedOptions["EnableBhop"]:
+		if Options["EnableAimbot"] and win32api.GetAsyncKeyState(Options["AimbotKey"]) & 0x8000:
+			aimbot.Aimbot_Update(ProcessObject, ClientModuleAddress, SharedOffsets, Options, ARDUINO_HANDLE=ARDUINO_HANDLE)
+
+		if Options["EnableBhop"]:
 			bhop.Bhop_Update(ProcessObject, ClientModuleAddress, SharedOffsets)
 
-		combined.Triggerbot_AntiFlash_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions)
-		rcs.RecoilControl_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions, ARDUINO_HANDLE)
+		combined.Triggerbot_AntiFlash_Update(ProcessObject, ClientModuleAddress, SharedOffsets, Options)
+		rcs.RecoilControl_Update(ProcessObject, ClientModuleAddress, SharedOffsets, Options, ARDUINO_HANDLE)

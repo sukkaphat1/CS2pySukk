@@ -6,6 +6,7 @@ from functions import gameinput
 
 import globals
 import win32api, win32gui
+import time
 
 def FovChangerThreadFunction(Options, Offsets):
 
@@ -14,7 +15,9 @@ def FovChangerThreadFunction(Options, Offsets):
 
 	while True:
 		localPlayer = memfuncs.ProcMemHandler.ReadPointer(processHandle, clientBaseAddress + Offsets.offset.dwLocalPlayerPawn)
-		if (not localPlayer): continue
+		if (not localPlayer):
+			time.sleep(0.05)
+			continue
 
 		try:
 			cameraServices = memfuncs.ProcMemHandler.ReadPointer(processHandle, localPlayer + Offsets.offset.m_pCameraServices)
@@ -34,3 +37,5 @@ def FovChangerThreadFunction(Options, Offsets):
 
 		except:
 			pass
+
+		time.sleep(0.01)

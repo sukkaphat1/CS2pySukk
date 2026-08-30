@@ -548,7 +548,7 @@ class CS2PY_GUI:
 					dpg.add_slider_int(label="Aimbot FOV", default_value=self.config["AimbotFOV"], min_value=1, max_value=200, callback=lambda s, d: self.config.update({"AimbotFOV": d}))
 					dpg.add_slider_int(label="Aimbot Smoothing", default_value=self.config["AimbotSmoothing"], min_value=1, max_value=10, callback=lambda s, d: self.config.update({"AimbotSmoothing": d}))
 					dpg.add_checkbox(label="Prediction (Velocity-based)", default_value=self.config["EnableAimbotPrediction"], callback=lambda s, d: self.config.update({"EnableAimbotPrediction": d}))
-					dpg.add_combo(label="Aim Position", items=["Head", "Neck", "Torso", "Leg"], default_value="Head", callback=lambda s, d: self.config.update({"AimPosition": d}))
+					dpg.add_combo(label="Aim Position", items=["Head", "Neck", "Torso", "Leg"], default_value=self.config.get("AimPosition", "Head"), callback=lambda s, d: self.config.update({"AimPosition": d}))
 					dpg.add_text("Aimbot HotKey")
 					dpg.add_button(label=KeyNames[self.config["AimbotKey"]] if self.config["AimbotKey"] < len(KeyNames) else f"Unknown({self.config['AimbotKey']})", user_data="AimbotKey", callback=self.keybind_use)
 
