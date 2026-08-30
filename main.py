@@ -138,15 +138,13 @@ if __name__ == "__main__":
 	discord_rpc_proc.start()
 
 	while esp.pme.overlay_loop():
-		Options = dict(SharedOptions)
+		esp.ESP_Update(ProcessObject, ClientModuleAddress, SharedOptions, SharedOffsets, SharedBombState)
 
-		esp.ESP_Update(ProcessObject, ClientModuleAddress, Options, SharedOffsets, SharedBombState)
+		if SharedOptions["EnableAimbot"] and win32api.GetAsyncKeyState(SharedOptions["AimbotKey"]) & 0x8000:
+			aimbot.Aimbot_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions, ARDUINO_HANDLE=ARDUINO_HANDLE)
 
-		if Options["EnableAimbot"] and win32api.GetAsyncKeyState(Options["AimbotKey"]) & 0x8000:
-			aimbot.Aimbot_Update(ProcessObject, ClientModuleAddress, SharedOffsets, Options, ARDUINO_HANDLE=ARDUINO_HANDLE)
-
-		if Options["EnableBhop"]:
+		if SharedOptions["EnableBhop"]:
 			bhop.Bhop_Update(ProcessObject, ClientModuleAddress, SharedOffsets)
 
-		combined.Triggerbot_AntiFlash_Update(ProcessObject, ClientModuleAddress, SharedOffsets, Options)
-		rcs.RecoilControl_Update(ProcessObject, ClientModuleAddress, SharedOffsets, Options, ARDUINO_HANDLE)
+		combined.Triggerbot_AntiFlash_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions)
+		rcs.RecoilControl_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions, ARDUINO_HANDLE)
