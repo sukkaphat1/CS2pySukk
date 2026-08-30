@@ -1,6 +1,20 @@
 import dearpygui.dearpygui as dpg
 import threading, time, os
 import win32api, win32gui, win32con
+import sys
+
+def _read_version():
+	try:
+		for base in (getattr(sys, '_MEIPASS', None), os.getcwd()):
+			if not base:
+				continue
+			p = os.path.join(base, 'version.txt')
+			if os.path.exists(p):
+				with open(p, 'r') as f:
+					return f.read().strip()
+	except Exception:
+		pass
+	return "?"
 
 KeyNames = [
 	"OFF",
@@ -527,13 +541,24 @@ class CS2PY_GUI:
 			dpg.add_mouse_move_handler(callback=self.is_dragging)
 		dpg.set_viewport_always_top(True)
 
+	def save_weapon_tap_time(self, sender, app_data, user_data):
+		weapon = self.config.get("CurrentWeapon", "")
+		if not weapon:
+			dpg.set_value("current_weapon_text", "Current Weapon: None (not detected)")
+			return
+		tap = float(self.config.get("TriggerbotTapInterval", 0.0))
+		times = dict(self.config.get("WeaponTapTimes", {}))
+		times[weapon] = tap
+		self.config.update({"WeaponTapTimes": times})
+		dpg.set_value("current_weapon_text", f"Current Weapon: {weapon} (saved {tap:.2f}s)")
+
 	def run(self):
 		dpg.show_viewport()
 		dpg.start_dearpygui()
 		dpg.destroy_context()
 
 	def build_ui(self):
-		with dpg.window(label="cs2py v2.0", width=self.viewport_width, height=self.viewport_height, no_move=True, no_resize=True, no_close=True, no_collapse=True, tag="cs2py_dpg_window"):
+		with dpg.window(label=f"CS2py Sukkaphat1 Fork v{_read_version()}", width=self.viewport_width, height=self.viewport_height, no_move=True, no_resize=True, no_close=True, no_collapse=True, tag="cs2py_dpg_window"):
 			dpg.add_text("INS Show/Hide Menu")
 			dpg.add_text("END To Quit Program")
 			dpg.add_text("HOME For Streamproof")
@@ -571,8 +596,16 @@ class CS2PY_GUI:
 					dpg.add_checkbox(label="Team Check##Triggerbot", default_value=self.config["EnableTriggerbotTeamCheck"], callback=lambda s, d: self.config.update({"EnableTriggerbotTeamCheck": d}))
 					dpg.add_checkbox(label="Key Check", default_value=self.config["EnableTriggerbotKeyCheck"], callback=lambda s, d: self.config.update({"EnableTriggerbotKeyCheck": d}))
 					dpg.add_slider_float(label="Tap Fire Interval", default_value=float(self.config.get("TriggerbotTapInterval", 0.0)), min_value=0.0, max_value=2.0, format="%.2f", callback=lambda s, d: self.config.update({"TriggerbotTapInterval": round(float(d), 2)}))
+					dpg.add_checkbox(label="Use Per-Weapon Tap Times", default_value=self.config.get("EnablePerWeaponTapTimes", False), callback=lambda s, d: self.config.update({"EnablePerWeaponTapTimes": d}))
+					dpg.add_text("Current Weapon: None", tag="current_weapon_text")
+					dpg.add_button(label="Save Tap Time for Current Weapon", callback=self.save_weapon_tap_time)
 					dpg.add_text("Triggerbot HotKey")
 					dpg.add_button(label=KeyNames[self.config["TriggerbotKey"]] if self.config["TriggerbotKey"] < len(KeyNames) else f"Unknown({self.config['TriggerbotKey']})", user_data="TriggerbotKey", callback=self.keybind_use)
+
+				with dpg.tab(label="Reactions"):
+					dpg.add_checkbox(label="Enable Simulated Reaction Time", default_value=self.config.get("EnableSimulatedReactionTime", False), callback=lambda s, d: self.config.update({"EnableSimulatedReactionTime": d}))
+					dpg.add_slider_int(label="Reaction Time (ms)", default_value=int(self.config.get("ReactionTime", 250)), min_value=0, max_value=1000, callback=lambda s, d: self.config.update({"ReactionTime": d}))
+					dpg.add_checkbox(label="Affect Triggerbot", default_value=self.config.get("AffectTriggerbotReaction", True), callback=lambda s, d: self.config.update({"AffectTriggerbotReaction": d}))
 
 				with dpg.tab(label="Recoil Control"):
 					dpg.add_checkbox(label="Enable Recoil Control", default_value=self.config["EnableRecoilControl"], callback=lambda s, d: self.config.update({"EnableRecoilControl": d}))

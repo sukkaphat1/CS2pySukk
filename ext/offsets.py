@@ -50,6 +50,12 @@ class Offset:
 	
 	m_bSpottedByMask: int
 	m_vecVelocity: int
+
+	m_pWeaponServices: int
+	m_hActiveWeapon: int
+	m_AttributeManager: int
+	m_Item: int
+	m_iItemDefinitionIndex: int
 	
 
 
@@ -269,6 +275,12 @@ def get_offsets() -> Offset:
 		
 		m_bSpottedByMask = oc.get("EntitySpottedState_t", "m_bSpottedByMask"),
 		m_vecVelocity = oc.get("C_BaseEntity", "m_vecVelocity"),
+
+		m_pWeaponServices = oc.get("C_BasePlayerPawn", "m_pWeaponServices"),
+		m_hActiveWeapon = oc.get("CPlayer_WeaponServices", "m_hActiveWeapon"),
+		m_AttributeManager = oc.get("C_EconEntity", "m_AttributeManager"),
+		m_Item = oc.get("C_AttributeContainer", "m_Item"),
+		m_iItemDefinitionIndex = oc.get("C_EconItemView", "m_iItemDefinitionIndex"),
 		
 	)
 	return offsets_obj

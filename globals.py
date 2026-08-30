@@ -33,6 +33,12 @@ CHEAT_SETTINGS = {
     "TriggerbotKey": 17,
     "EnableTriggerbotTeamCheck": False,
     "TriggerbotTapInterval": 0.0,
+    "EnableSimulatedReactionTime": False,
+    "ReactionTime": 250,
+    "AffectTriggerbotReaction": True,
+    "EnablePerWeaponTapTimes": False,
+    "WeaponTapTimes": {},
+    "CurrentWeapon": "",
 
     "EnableESPDistanceRendering": True,
     "EnableESPTeamCheck": False,
