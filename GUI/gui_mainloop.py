@@ -624,6 +624,8 @@ class CS2PY_GUI:
 					dpg.add_separator()
 					dpg.add_checkbox(label="Enable Bhop", default_value=self.config["EnableBhop"], callback=lambda s, d: self.config.update({"EnableBhop": d}))
 					dpg.add_separator()
+					dpg.add_checkbox(label="Enable Radar Hack", default_value=self.config.get("EnableRadarHack", False), callback=lambda s, d: self.config.update({"EnableRadarHack": d}))
+					dpg.add_separator()
 					dpg.add_checkbox(label="Enable Discord RPC", default_value=self.config["EnableDiscordRPC"], callback=lambda s, d: self.config.update({"EnableDiscordRPC": d}))
 					dpg.add_separator()
 					dpg.add_checkbox(label="Enable FOV Changer", default_value=self.config["EnableFovChanger"], callback=lambda s, d: self.config.update({"EnableFovChanger": d}))

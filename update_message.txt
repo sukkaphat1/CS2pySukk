@@ -1,7 +1,3 @@
-v1.0.7 - Per-weapon triggerbot tap fire.
-
-Set the Tap Fire Interval slider, then click "Save Tap Time for Current Weapon" while holding that gun, and enable "Use Per-Weapon Tap Times".
-
-Saved times apply per weapon in the background - the slider won't change and stays as the fallback for weapons you haven't saved.
+v1.0.8 - Radar hack: every enemy now shows on your radar.
 
 Download: https://github.com/sukkaphat1/CS2pySukk/releases

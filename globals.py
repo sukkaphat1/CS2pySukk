@@ -59,6 +59,8 @@ CHEAT_SETTINGS = {
 
     "EnableBhop": False,
 
+    "EnableRadarHack": False,
+
     "EnableDiscordRPC": True,
 }
 

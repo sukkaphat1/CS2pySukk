@@ -9,6 +9,7 @@ from features import esp
 from features import bombtimer
 from features import fovchanger
 from features import bhop
+from features import radar
 from features import discodrpc
 
 from GUI import gui_mainloop
@@ -83,7 +84,10 @@ def LoadConfig():
 			json.dump(globals.CHEAT_SETTINGS, fp, indent=4)
 	else:
 		with open(globals.SAVE_FILE, "r") as fp:
-			globals.CHEAT_SETTINGS = json.load(fp)
+			loaded = json.load(fp)
+		for key, value in globals.CHEAT_SETTINGS.items():
+			loaded.setdefault(key, value)
+		globals.CHEAT_SETTINGS = loaded
 
 if __name__ == "__main__":
 
@@ -145,6 +149,9 @@ if __name__ == "__main__":
 
 		if SharedOptions["EnableBhop"]:
 			bhop.Bhop_Update(ProcessObject, ClientModuleAddress, SharedOffsets)
+
+		if SharedOptions.get("EnableRadarHack", False):
+			radar.RadarHack_Update(ProcessObject, ClientModuleAddress, SharedOffsets)
 
 		combined.Triggerbot_AntiFlash_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions)
 		rcs.RecoilControl_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions, ARDUINO_HANDLE)
