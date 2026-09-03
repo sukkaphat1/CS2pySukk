@@ -347,11 +347,21 @@ static void Loop() {
     }
 }
 
+static DWORD WINAPI LoopThread(LPVOID) {
+    Loop();
+    return 0;
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
         DllLog("DllMain: attach, module=%p", (void*)hModule);
-        std::thread(Loop).detach();
+        // Do NOT use std::thread here: constructing a CRT thread during
+        // DLL_PROCESS_ATTACH can deadlock on the loader lock (the new thread's
+        // CRT startup re-acquires it while LoadLibraryA still holds it). A raw
+        // CreateThread returns immediately and lets Loop run after DllMain
+        // returns and the lock is released.
+        CreateThread(nullptr, 0, LoopThread, nullptr, 0, nullptr);
     } else if (reason == DLL_PROCESS_DETACH) {
         DllLog("DllMain: detach, module=%p", (void*)hModule);
     }

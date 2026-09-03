@@ -23,6 +23,11 @@ _DLL_NAME = "skinchanger.dll"
 
 
 def _log(msg):
+    # Show status in the cheat console AND record it to the debug log.
+    try:
+        print(f"[skin-changer] {msg}", flush=True)
+    except Exception:
+        pass
     try:
         with open(os.path.join(os.path.expanduser("~"), "cs2py_skin_debug.log"), "a", encoding="utf-8") as f:
             f.write(msg + "\n")

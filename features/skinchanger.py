@@ -284,6 +284,10 @@ _DEBUG_LOG = os.path.join(os.path.expanduser("~"), "cs2py_skin_debug.log")
 
 def _log(msg):
     try:
+        print(f"[skin-changer] {msg}", flush=True)
+    except Exception:
+        pass
+    try:
         with open(_DEBUG_LOG, "a", encoding="utf-8") as f:
             f.write(msg + "\n")
     except Exception:
