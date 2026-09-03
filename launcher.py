@@ -9,17 +9,18 @@ works.
 Each launch the launcher:
   1. makes sure Python and Git are installed (downloads + silently installs the
      official installers next to this exe when they are missing),
-  2. pulls the latest source from GitHub (git clone on first run, else git pull),
-  3. verifies the local files match the remote version,
-  4. installs/refreshes Python dependencies if needed,
-  5. runs ``main.py`` from the Documents folder.
+  2. makes sure pyMeow is installed (downloads + installs the wheel when missing),
+  3. pulls the latest source from GitHub (git clone on first run, else git pull),
+  4. verifies the local files match the remote version,
+  5. installs/refreshes Python dependencies if needed,
+  6. runs ``main.py`` from the Documents folder (console attached so its
+     ``input()`` prompts work).
 
 It is intentionally packaged as a tiny onefile exe with NO bundled data — the
 source and DLL always come from Documents via git, so a new release never needs
 a rebuilt launcher.
 """
 import os
-import shutil
 import subprocess
 import sys
 import urllib.request
@@ -40,7 +41,12 @@ PYTHON_LOCAL = os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python313\pyt
 GIT_INSTALLER = "Git-2.55.0.3-64-bit.exe"
 GIT_URL = f"https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.3/{GIT_INSTALLER}"
 
-# Resolved once at startup: command prefix for Python, path for git.exe.
+# pyMeow is not on PyPI; it ships as a zip from GitHub releases.
+PYMEOW_VERSION = "1.73.42"
+PYMEOW_ZIP = f"pyMeow-{PYMEOW_VERSION}.zip"
+PYMEOW_URL = f"https://github.com/qb-0/pyMeow/releases/download/{PYMEOW_VERSION}/{PYMEOW_ZIP}"
+
+# Resolved once at startup: command prefix for Python (list), path for git.exe.
 _PY = None
 _GIT = None
 
@@ -49,9 +55,15 @@ def log(msg=""):
     print(msg, flush=True)
 
 
-def run(cmd, cwd=None):
-    """Run a command, returning CompletedProcess. Never raises on nonzero."""
+def sh_run(cmd, cwd=None):
+    """Run a string command via cmd, capturing output. Never raises."""
     return subprocess.run(cmd, cwd=cwd, shell=True, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+
+def py_run(args, cwd=None):
+    """Run a Python command (list form — no shell quoting issues)."""
+    return subprocess.run(_PY + args, cwd=cwd, text=True,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
@@ -62,11 +74,10 @@ def _exe_dir():
 
 
 def _download(url, dest):
-    """Download a file with a simple progress line. Returns True on success."""
     log(f"Downloading {os.path.basename(dest)} ...")
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "cs2py-launcher/1.0"})
-        with urllib.request.urlopen(req, timeout=60) as resp, open(dest, "wb") as f:
+        with urllib.request.urlopen(req, timeout=120) as resp, open(dest, "wb") as f:
             total = int(resp.headers.get("Content-Length") or 0)
             done = 0
             while True:
@@ -76,8 +87,7 @@ def _download(url, dest):
                 f.write(chunk)
                 done += len(chunk)
                 if total:
-                    pct = done * 100 // total
-                    sys.stdout.write(f"\r  {pct}% ({done // 1048576} MB)   ")
+                    sys.stdout.write(f"\r  {done * 100 // total}% ({done // 1048576} MB)   ")
                     sys.stdout.flush()
         sys.stdout.write("\n")
         sys.stdout.flush()
@@ -88,7 +98,6 @@ def _download(url, dest):
 
 
 def _installer_path(name):
-    """Place installers next to the exe (fall back to %TEMP% if not writable)."""
     d = _exe_dir()
     p = os.path.join(d, name)
     if not os.path.isdir(d):
@@ -98,9 +107,10 @@ def _installer_path(name):
 
 
 def _find_python():
-    """Return a command prefix for a working Python, or None."""
-    for prefix in (["py", "-3"], ["python"], ["python3"]):
-        if run(" ".join(prefix + ["--version"])).returncode == 0:
+    # Prefer the Windows py launcher targeting 3.13 (pyMeow's cp313 ABI), then
+    # latest py, then plain python, then known install locations.
+    for prefix in (["py", "-3.13"], ["py", "-3"], ["python"], ["python3"]):
+        if sh_run(" ".join(prefix + ["--version"])).returncode == 0:
             return prefix
     for cand in (PYTHON_LOCAL,
                  os.path.expandvars(r"%ProgramFiles%\Python313\python.exe"),
@@ -111,8 +121,7 @@ def _find_python():
 
 
 def _find_git():
-    """Return a git.exe path (string) or None."""
-    if run("git --version").returncode == 0:
+    if sh_run("git --version").returncode == 0:
         return "git"
     for cand in (os.path.expandvars(r"%LOCALAPPDATA%\Programs\Git\cmd\git.exe"),
                  os.path.expandvars(r"%ProgramFiles%\Git\cmd\git.exe"),
@@ -123,7 +132,6 @@ def _find_git():
 
 
 def ensure_python():
-    """Ensure a Python interpreter exists, installing one if necessary."""
     global _PY
     _PY = _find_python()
     if _PY:
@@ -133,12 +141,11 @@ def ensure_python():
     p = _installer_path(PYTHON_INSTALLER)
     if not (os.path.isfile(p) and os.path.getsize(p) > 10 * 1024 * 1024) and not _download(PYTHON_URL, p):
         log("[ERROR] Could not download the Python installer.")
-        log(f"Install Python manually from https://www.python.org/downloads/ (>= 3.10), then re-run.")
+        log("Install Python manually from https://www.python.org/downloads/ (>= 3.10), then re-run.")
         return False
 
     log("Installing Python silently (per-user, with pip) ...")
-    # /quiet + InstallAllUsers=0 = no admin, per-user install; Include_pip=1.
-    r = run(f'"{p}" /quiet InstallAllUsers=0 PrependPath=1 Include_pip=1 Include_launcher=0 SimpleInstall=1')
+    r = sh_run(f'"{p}" /quiet InstallAllUsers=0 PrependPath=1 Include_pip=1 Include_launcher=0 SimpleInstall=1')
     if r.returncode != 0:
         log(f"[WARN] Python installer returned {r.returncode}; checking result ...")
 
@@ -152,7 +159,6 @@ def ensure_python():
 
 
 def ensure_git():
-    """Ensure git.exe exists, installing Git for Windows if necessary."""
     global _GIT
     _GIT = _find_git()
     if _GIT:
@@ -166,8 +172,7 @@ def ensure_git():
         return False
 
     log("Installing Git silently (per-user) ...")
-    # Inno Setup: /VERYSILENT + /CURRENTUSER = no admin, no UI.
-    r = run(f'"{p}" /VERYSILENT /NORESTART /NOCANCEL /SP- /CURRENTUSER /COMPONENTS="icons,assoc,assoc_sh"')
+    r = sh_run(f'"{p}" /VERYSILENT /NORESTART /NOCANCEL /SP- /CURRENTUSER /COMPONENTS="icons,assoc,assoc_sh"')
     if r.returncode != 0:
         log(f"[WARN] Git installer returned {r.returncode}; checking result ...")
 
@@ -180,12 +185,42 @@ def ensure_git():
     return False
 
 
+def _pymew_ok():
+    return py_run(["-c", "import pyMeow"]).returncode == 0
+
+
+def ensure_pymew():
+    """Install pyMeow (wheel from GitHub) if it isn't importable."""
+    if _pymew_ok():
+        return True
+
+    log("pyMeow is missing; downloading ...")
+    p = _installer_path(PYMEOW_ZIP)
+    if not (os.path.isfile(p) and os.path.getsize(p) > 1024 * 1024) and not _download(PYMEOW_URL, p):
+        log("[ERROR] Could not download pyMeow.")
+        log("Install it manually from https://github.com/qb-0/pyMeow, then re-run.")
+        return False
+
+    log("Installing pyMeow ...")
+    r = py_run(["-m", "pip", "install", "--no-cache-dir", p])
+    if r.returncode != 0:
+        log(f"[WARN] pyMeow install returned {r.returncode}:\n{r.stdout[-800:]}")
+
+    if _pymew_ok():
+        log("pyMeow installed successfully.")
+        return True
+    log("[ERROR] pyMeow is still not importable after install (Python ABI mismatch?).")
+    log("Make sure you are on Python 3.13; re-run after installing it.")
+    return False
+
+
 def git_run(args, cwd=None):
-    return run(f'"{_GIT}" {args}' if _GIT != "git" else f"{_GIT} {args}", cwd=cwd)
+    if _GIT == "git":
+        return sh_run(f"git {args}", cwd=cwd)
+    return sh_run(f'"{_GIT}" {args}', cwd=cwd)
 
 
 def ensure_cloned():
-    """Clone the repo if the install dir is missing/empty, else return True."""
     if not os.path.isdir(INSTALL_DIR):
         log(f"First run: cloning {REPO_URL} ...")
         r = git_run(f"clone --depth 1 --branch {BRANCH} \"{REPO_URL}\" \"{INSTALL_DIR}\"")
@@ -202,7 +237,6 @@ def ensure_cloned():
 
 
 def sync_and_verify():
-    """git pull and verify version.txt matches the remote."""
     local_main = os.path.join(INSTALL_DIR, MAIN_SCRIPT)
     if not os.path.isfile(local_main):
         log(f"[ERROR] {MAIN_SCRIPT} missing after clone.")
@@ -241,7 +275,6 @@ def _read_version():
 
 
 def ensure_dependencies():
-    """Install/refresh requirements if the marker doesn't match requirements.txt."""
     req = os.path.join(INSTALL_DIR, REQUIREMENTS)
     if not os.path.isfile(req):
         return
@@ -265,7 +298,7 @@ def ensure_dependencies():
         return
 
     log("Installing/updating Python dependencies ...")
-    r = run(" ".join(_PY + ["-m", "pip", "install", "-r", REQUIREMENTS]), cwd=INSTALL_DIR)
+    r = py_run(["-m", "pip", "install", "-r", REQUIREMENTS], cwd=INSTALL_DIR)
     if r.returncode != 0:
         log(f"[WARN] pip install had errors (continuing anyway):\n{r.stdout[-800:]}")
     else:
@@ -274,13 +307,6 @@ def ensure_dependencies():
                 f.write(sha)
         except OSError:
             pass
-
-
-def check_pymew():
-    """pyMeow isn't in requirements.txt (installed from a wheel); warn if absent."""
-    r = run(" ".join(_PY + ["-c", "import pyMeow"]))
-    if r.returncode != 0:
-        log("[WARN] pyMeow is not installed. Install it from https://github.com/qb-0/pyMeow")
 
 
 def main():
@@ -303,14 +329,15 @@ def main():
     version = sync_and_verify()
     log(f"Version: v{version}")
     ensure_dependencies()
-    check_pymew()
+    ensure_pymew()
 
     log(f"\nLaunching {MAIN_SCRIPT} from {INSTALL_DIR} ...")
     log("(Keep this window open; it is the cheat's console.)\n")
-    r = run(" ".join(_PY + [MAIN_SCRIPT]), cwd=INSTALL_DIR)
-    log(f"\n[cs2py exited with code {r.returncode}]")
-    if r.returncode != 0:
-        log(r.stdout[-2000:] if r.stdout else "(no output)")
+
+    # Run main.py with the console attached (inherit stdio) so its input()
+    # prompts (e.g. the Arduino question) show up and can be answered.
+    r = subprocess.call(_PY + [MAIN_SCRIPT], cwd=INSTALL_DIR)
+    log(f"\n[cs2py exited with code {r}]")
     input("\nPress Enter to exit ...")
     return 0
 
