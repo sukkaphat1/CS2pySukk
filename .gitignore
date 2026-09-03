@@ -6,13 +6,24 @@ __pycache__/
 build/
 dist/*
 !dist/cs2py.exe
+!dist/CS2pyLauncher.exe
 dist.zip
 *.spec
+*.obj
+
+# Local item schema source (large Valve VDF, only needed to rebuild the cache)
+items_game.txt
+
+# Dev / scratch scripts
+scan_*.py
+test_skin_loop.py
+smoke_test_menu.py
 
 # Runtime state (user config + offsets-update marker)
 settings.json
 .offsets_sha
 backup_old_version/
+collision_cache/
 
 # Local pyMeow wheel (install from upstream instead of committing the binary)
 pyMeow-1.73.42.zip

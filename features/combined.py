@@ -17,6 +17,8 @@ WEAPON_NAMES = {
 	34: "MP9", 35: "Nova", 36: "P250", 38: "SCAR-20", 39: "SG 553",
 	40: "SSG 08", 42: "Knife", 59: "Knife", 61: "USP-S", 63: "CZ75-Auto",
 	64: "R8 Revolver",
+	43: "Flashbang", 44: "HE Grenade", 45: "Smoke Grenade",
+	46: "Molotov", 47: "Decoy Grenade", 48: "Incendiary Grenade",
 }
 
 def get_current_weapon_name(processHandle, clientBaseAddress, localPlayer, Offsets):

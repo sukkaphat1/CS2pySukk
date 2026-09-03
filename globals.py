@@ -1,5 +1,6 @@
 import win32api
 from ext import offsets
+from ext import paths
 from ext.datatypes import *
 import os
 
@@ -9,7 +10,7 @@ SCREEN_HEIGHT = win32api.GetSystemMetrics(1)
 
 GAME_OFFSETS = offsets.get_offsets()
 
-SAVE_FILE = os.path.join(os.getcwd(), "settings.json")
+SAVE_FILE = os.path.join(paths.writable_dir(), "settings.json")
 
 CHEAT_SETTINGS = {
     "EnableAntiFlashbang": False,
@@ -60,6 +61,23 @@ CHEAT_SETTINGS = {
     "EnableBhop": False,
 
     "EnableRadarHack": False,
+
+    "EnableGrenadeTrajectory": False,
+    "GrenadeTrajectoryColor": "#00FF00",
+    "GrenadeTrajectoryMap": "",
+    "GrenadeTrajectoryGamePath": "",
+    "GrenadeTrajectoryGravity": 320.0,
+    "GrenadeTrajectoryTossSpeed": 300.0,
+    "GrenadeTrajectoryThrowStrength": 1.0,
+    "GrenadeTrajectoryRestitution": 0.45,
+    "GrenadeTrajectorySpawnHeightOffset": 0.0,
+    "GrenadeTrajectoryPitchOffset": 0.0,
+    "GrenadeTrajectoryGhostFade": 1.0,
+
+    "SkinChanger": {
+        "enabled": False,
+        "weapons": {},
+    },
 
     "EnableDiscordRPC": True,
 }

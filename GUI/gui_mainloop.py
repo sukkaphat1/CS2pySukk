@@ -590,6 +590,13 @@ class CS2PY_GUI:
 					dpg.add_checkbox(label="Enable FOV Circle", default_value=self.config["EnableFOVCircle"], callback=lambda s, d: self.config.update({"EnableFOVCircle": d}))
 					dpg.add_separator()
 					dpg.add_checkbox(label="Enable Bomb Timer", default_value=self.config["EnableESPBombTimer"], callback=lambda s, d: self.config.update({"EnableESPBombTimer": d}))
+					dpg.add_separator()
+					dpg.add_checkbox(label="Enable Grenade Trajectory", default_value=self.config.get("EnableGrenadeTrajectory", False), callback=lambda s, d: self.config.update({"EnableGrenadeTrajectory": d}))
+					dpg.add_input_float(label="Grenade Start Height", default_value=float(self.config.get("GrenadeTrajectorySpawnHeightOffset", 0.0)), step=1.0, format="%.1f", callback=lambda s, d: self.config.update({"GrenadeTrajectorySpawnHeightOffset": float(d)}))
+					dpg.add_input_float(label="Grenade Tilt (deg, + up)", default_value=float(self.config.get("GrenadeTrajectoryPitchOffset", 0.0)), step=1.0, format="%.1f", callback=lambda s, d: self.config.update({"GrenadeTrajectoryPitchOffset": float(d)}))
+					dpg.add_input_float(label="Grenade Throw Strength", default_value=float(self.config.get("GrenadeTrajectoryThrowStrength", 1.0)), step=0.05, format="%.2f", callback=lambda s, d: self.config.update({"GrenadeTrajectoryThrowStrength": float(d)}))
+					dpg.add_input_float(label="Grenade Elasticity", default_value=float(self.config.get("GrenadeTrajectoryRestitution", 0.45)), step=0.05, format="%.2f", callback=lambda s, d: self.config.update({"GrenadeTrajectoryRestitution": float(d)}))
+					dpg.add_input_float(label="Grenade Ghost Fade (+ = slower)", default_value=float(self.config.get("GrenadeTrajectoryGhostFade", 1.0)), step=0.5, format="%.1f", callback=lambda s, d: self.config.update({"GrenadeTrajectoryGhostFade": float(d)}))
 
 				with dpg.tab(label="Triggerbot"):
 					dpg.add_checkbox(label="Enable Trigger Bot", default_value=self.config["EnableTriggerbot"], callback=lambda s, d: self.config.update({"EnableTriggerbot": d}))
@@ -618,6 +625,7 @@ class CS2PY_GUI:
 					dpg.add_separator()
 					dpg.add_text("Misc Colors")
 					dpg.add_color_picker(label="FOV Color", default_value=self.hex_to_rgb(self.config["FOV_color"]), no_alpha=True, no_inputs=True, no_side_preview=True, no_small_preview=True, width=75, height=75, callback=lambda s, d: self.config.update({"FOV_color": self.rgb_to_hex(d)}))
+					dpg.add_color_picker(label="Grenade Trajectory", default_value=self.hex_to_rgb(self.config.get("GrenadeTrajectoryColor", "#00FF00")), no_alpha=True, no_inputs=True, no_side_preview=True, no_small_preview=True, width=75, height=75, callback=lambda s, d: self.config.update({"GrenadeTrajectoryColor": self.rgb_to_hex(d)}))
 
 				with dpg.tab(label="Misc"):
 					dpg.add_checkbox(label="Enable Anti Flashbang", default_value=self.config["EnableAntiFlashbang"], callback=lambda s, d: self.config.update({"EnableAntiFlashbang": d}))

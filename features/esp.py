@@ -7,6 +7,7 @@ import win32api, win32gui
 import pyMeow as pme
 import time
 import concurrent.futures
+from features import grenade
 
 boneConnections = [
 	('head', 'neck_0'), ('neck_0', 'spine_1'), ('spine_1', 'spine_2'), ('spine_2', 'pelvis'),
@@ -186,6 +187,9 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
 			pme.draw_text(bomb_text, 20, y_position + 10, fontSize=font_size, color=text_color)
 	except Exception:
 		pass
+
+	if Options.get("EnableGrenadeTrajectory", False):
+		grenade.GrenadeTrajectory_Update(processHandle, clientBaseAddress, Offsets, Options)
 
 
 

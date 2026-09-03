@@ -4,6 +4,8 @@ import sys
 import json
 import requests
 
+from ext import paths
+
 REMOTE_REPO = "sukkaphat1/CS2pySukk"
 REMOTE_BRANCH = "main"
 RAW_BASE = f"https://raw.githubusercontent.com/{REMOTE_REPO}/{REMOTE_BRANCH}"
@@ -16,6 +18,7 @@ class Offset:
 	dwLocalPlayerController: int
 	dwViewAngles: int
 	dwGameRules: int
+	dwGlobalVars: int
 	dwSensitivity_sensitivity: int
 	dwSensitivity: int 
 
@@ -43,6 +46,8 @@ class Offset:
 	m_entitySpottedState: int 
 	m_bSpotted: int 
 	m_bBombPlanted: int
+	m_vMinimapMins: int
+	m_vMinimapMaxs: int
 	
 	m_iShotsFired: int
 	m_pAimPunchServices: int
@@ -56,15 +61,36 @@ class Offset:
 	m_AttributeManager: int
 	m_Item: int
 	m_iItemDefinitionIndex: int
+	m_nFallbackPaintKit: int
+	m_nFallbackSeed: int
+	m_flFallbackWear: int
+	m_nFallbackStatTrak: int
+	m_iEntityQuality: int
+	m_iItemIDHigh: int
+	m_iItemIDLow: int
+	m_iItemID: int
+	m_iAccountID: int
+	m_bDisallowSOC: int
+	m_bInitialized: int
+	m_bRestoreCustomMaterialAfterPrecache: int
+	m_OriginalOwnerXuidLow: int
+	m_OriginalOwnerXuidHigh: int
+	m_AttributeList: int
+	m_hMyWearables: int
+	m_designerName: int
+	m_vecAbsOrigin: int
+	v_angle: int
+	m_angEyeAngles: int
+	m_vecAbsVelocity: int
 	
 
 
 def _dump_dir():
-	"""Find the output dump folder: writable cwd dump first (freshly pulled or
+	"""Find the output dump folder: writable copy first (freshly pulled or
 	user-updated), then the bundled PyInstaller data."""
-	candidate = os.path.join(os.getcwd(), 'output', 'offsets.json')
+	candidate = os.path.join(paths.writable_dir(), 'output', 'offsets.json')
 	if os.path.exists(candidate):
-		return os.path.join(os.getcwd(), 'output')
+		return os.path.join(paths.writable_dir(), 'output')
 	meipass = getattr(sys, '_MEIPASS', None)
 	if meipass:
 		candidate = os.path.join(meipass, 'output', 'offsets.json')
@@ -86,9 +112,9 @@ def try_pull_updates():
 	downloads when it changed. Never raises - any failure falls back to the
 	local/bundled dump."""
 	try:
-		local_dir = os.path.join(os.getcwd(), 'output')
+		local_dir = os.path.join(paths.writable_dir(), 'output')
 		os.makedirs(local_dir, exist_ok=True)
-		marker = os.path.join(os.getcwd(), '.offsets_sha')
+		marker = os.path.join(paths.writable_dir(), '.offsets_sha')
 
 		api = f'https://api.github.com/repos/{REMOTE_REPO}/commits?path=output&per_page=1'
 		r = requests.get(api, timeout=8)
@@ -243,6 +269,7 @@ def get_offsets() -> Offset:
 		dwLocalPlayerController=oc.offset("dwLocalPlayerController"),
 		dwViewAngles = oc.offset("dwViewAngles"),
 		dwGameRules = oc.offset("dwGameRules"),
+		dwGlobalVars = oc.offset("dwGlobalVars"),
 		dwSensitivity_sensitivity = oc.offset("dwSensitivity_sensitivity"),
 		dwSensitivity = oc.offset("dwSensitivity"),
 		
@@ -269,6 +296,8 @@ def get_offsets() -> Offset:
 		m_entitySpottedState = oc.get("C_CSPlayerPawn", "m_entitySpottedState"),
 		m_bSpotted = oc.get("EntitySpottedState_t", "m_bSpotted"),
 		m_bBombPlanted = oc.get("C_CSGameRules", "m_bBombPlanted"),
+		m_vMinimapMins = oc.get("C_CSGameRules", "m_vMinimapMins"),
+		m_vMinimapMaxs = oc.get("C_CSGameRules", "m_vMinimapMaxs"),
 		m_iShotsFired = oc.get("C_CSPlayerPawn", "m_iShotsFired"),
 		m_pAimPunchServices = oc.get("C_CSPlayerPawn", "m_pAimPunchServices"),
 		m_unpredictableBaseTick = oc.get("CCSPlayer_AimPunchServices", "m_unpredictableBaseTick"),
@@ -281,6 +310,27 @@ def get_offsets() -> Offset:
 		m_AttributeManager = oc.get("C_EconEntity", "m_AttributeManager"),
 		m_Item = oc.get("C_AttributeContainer", "m_Item"),
 		m_iItemDefinitionIndex = oc.get("C_EconItemView", "m_iItemDefinitionIndex"),
+		m_nFallbackPaintKit = oc.get("C_EconEntity", "m_nFallbackPaintKit"),
+		m_nFallbackSeed = oc.get("C_EconEntity", "m_nFallbackSeed"),
+		m_flFallbackWear = oc.get("C_EconEntity", "m_flFallbackWear"),
+		m_nFallbackStatTrak = oc.get("C_EconEntity", "m_nFallbackStatTrak"),
+		m_iEntityQuality = oc.get("C_EconItemView", "m_iEntityQuality"),
+		m_iItemIDHigh = oc.get("C_EconItemView", "m_iItemIDHigh"),
+		m_iItemIDLow = oc.get("C_EconItemView", "m_iItemIDLow"),
+		m_iItemID = oc.get("C_EconItemView", "m_iItemID"),
+		m_iAccountID = oc.get("C_EconItemView", "m_iAccountID"),
+		m_bDisallowSOC = oc.get("C_EconItemView", "m_bDisallowSOC"),
+		m_bInitialized = oc.get("C_EconItemView", "m_bInitialized"),
+		m_bRestoreCustomMaterialAfterPrecache = oc.get("C_EconItemView", "m_bRestoreCustomMaterialAfterPrecache"),
+		m_OriginalOwnerXuidLow = oc.get("C_EconEntity", "m_OriginalOwnerXuidLow"),
+		m_OriginalOwnerXuidHigh = oc.get("C_EconEntity", "m_OriginalOwnerXuidHigh"),
+		m_AttributeList = oc.get("C_EconItemView", "m_AttributeList"),
+		m_hMyWearables = oc.get("C_BaseCombatCharacter", "m_hMyWearables"),
+		m_designerName = oc.get("CEntityIdentity", "m_designerName"),
+		m_vecAbsOrigin = oc.get("CGameSceneNode", "m_vecAbsOrigin"),
+		v_angle = oc.get("C_BasePlayerPawn", "v_angle"),
+		m_angEyeAngles = oc.get("C_CSPlayerPawn", "m_angEyeAngles"),
+		m_vecAbsVelocity = oc.get("C_BaseEntity", "m_vecAbsVelocity"),
 		
 	)
 	return offsets_obj

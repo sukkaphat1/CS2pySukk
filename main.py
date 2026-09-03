@@ -11,8 +11,9 @@ from features import fovchanger
 from features import bhop
 from features import radar
 from features import discodrpc
+from features import skinchanger
+from features import menu
 
-from GUI import gui_mainloop
 from GUI import gui_util
 
 import multiprocessing
@@ -26,7 +27,6 @@ import keyboard, os, json
 import time
 
 keyboard.add_hotkey("end", callback=lambda: os._exit(0))
-keyboard.add_hotkey("insert", callback=lambda: gui_util.hide_dpg())
 keyboard.add_hotkey("home", callback=lambda: gui_util.streamproof_toggle())
 
 class ManagedConfig:
@@ -119,9 +119,6 @@ if __name__ == "__main__":
 	SharedOffsets = Manager.Namespace()
 	SharedOffsets.offset  = globals.GAME_OFFSETS
 
-	GUI_proc = multiprocessing.Process(target=gui_mainloop.run_gui, args=(SharedOptions,))
-	GUI_proc.start()
-
 	esp.pme.overlay_init(title="ESP-Overlay")
 	fps = esp.pme.get_monitor_refresh_rate()
 	esp.pme.set_fps(fps)
@@ -142,7 +139,14 @@ if __name__ == "__main__":
 	discord_rpc_proc.start()
 
 	while esp.pme.overlay_loop():
-		esp.ESP_Update(ProcessObject, ClientModuleAddress, SharedOptions, SharedOffsets, SharedBombState)
+		menu.update()
+
+		if menu.is_open():
+			esp.pme.begin_drawing()
+			menu.draw(ProcessObject, ClientModuleAddress, SharedOptions, SharedOffsets)
+			esp.pme.end_drawing()
+		else:
+			esp.ESP_Update(ProcessObject, ClientModuleAddress, SharedOptions, SharedOffsets, SharedBombState)
 
 		if SharedOptions["EnableAimbot"] and win32api.GetAsyncKeyState(SharedOptions["AimbotKey"]) & 0x8000:
 			aimbot.Aimbot_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions, ARDUINO_HANDLE=ARDUINO_HANDLE)
@@ -152,6 +156,11 @@ if __name__ == "__main__":
 
 		if SharedOptions.get("EnableRadarHack", False):
 			radar.RadarHack_Update(ProcessObject, ClientModuleAddress, SharedOffsets)
+
+		try:
+			skinchanger.SkinChanger_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions)
+		except Exception as e:
+			print(f"[skin-changer] error: {e}")
 
 		combined.Triggerbot_AntiFlash_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions)
 		rcs.RecoilControl_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions, ARDUINO_HANDLE)

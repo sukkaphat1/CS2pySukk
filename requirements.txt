@@ -5,3 +5,6 @@ pypresence==4.3.0
 pyserial==3.5
 pywin32==310
 requests==2.32.5
+zstandard==0.25.0
+psutil==7.0.0
+vdf==3.4
