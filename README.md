@@ -18,6 +18,16 @@
 
 ## Installation
 
+The easiest way to run cs2py is the **launcher** (`CS2pyLauncher.exe`). It:
+- downloads and silently installs **Python 3.13** and **Git for Windows** if they're missing,
+- clones/updates the source to `Documents\CS2pySukk`,
+- verifies the files match the latest release,
+- installs Python dependencies and launches the cheat.
+
+> Requires an internet connection on first run.
+
+Alternatively, run from source:
+
 ```
 pip install -r requirements.txt
 ```
