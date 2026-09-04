@@ -627,6 +627,28 @@ static void ApplyGloves(uintptr_t client, uintptr_t pawn) {
                 DllLog("glove: wearable[%d] handle=0x%X -> no entity", i, h);
             }
         }
+        if (!wearables) {
+            // m_hMyWearables is empty: scan the whole entity list for any glove
+            // entity so we can see where it actually lives on this build.
+            uintptr_t entityList = *(uintptr_t*)(client + OFF_DW_ENTITY_LIST);
+            if (entityList && safe_ptr(entityList)) {
+                int found = 0;
+                for (int chunk = 0; chunk < 64 && found < 8; chunk++) {
+                    uintptr_t le = *(uintptr_t*)(entityList + 0x8 * chunk + 0x10);
+                    if (!le || !safe_ptr(le)) continue;
+                    for (int i = 0; i < 512; i++) {
+                        uintptr_t e = *(uintptr_t*)(le + 0x70 * i);
+                        if (!e || !safe_ptr(e)) continue;
+                        uint16_t d = *(uint16_t*)(e + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM + OFF_M_ITEMDEFINDEX);
+                        if (is_glove_def(d)) {
+                            DllLog("glove: entitylist[%d][%d] def=%u at %p", chunk, i, (unsigned)d, (void*)e);
+                            found++;
+                        }
+                    }
+                }
+                if (!found) DllLog("glove: entity-list scan found no glove entity");
+            }
+        }
     }
 
     if (!wearables || !safe_ptr(wearables)) { haveLast = 0; return; }
