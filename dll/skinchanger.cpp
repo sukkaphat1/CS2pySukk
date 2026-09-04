@@ -109,6 +109,15 @@ static int is_glove_def(uint16_t def) {
     return (def >= 5027 && def <= 5035) || def == 4725;
 }
 
+// Reject null/low/high pointers and unmapped pages. During map teardown the
+// game frees + unmaps entities while our loop still holds their old addresses;
+// dereferencing those is exactly what access-violates cs2 on exit/match end.
+// IsBadReadPtr probes safely (SEH) so this never faults on its own.
+static int safe_ptr(uintptr_t p) {
+    if (p < 0x10000 || p > 0x7FFFFFFFFFFFull) return 0;
+    return !IsBadReadPtr((const void*)p, 8);
+}
+
 // Writes the decimal representation of v into out, returns digit count.
 static int u32toa(char* out, uint32_t v) {
     char tmp[12];
@@ -587,6 +596,7 @@ static void ApplyGloves(uintptr_t client, uintptr_t pawn) {
     static float lastWear = -1.0f;
     static char lastModel[320];
     static int haveLast = 0;
+    static int dbgDone = 0;
 
     const SkinCfg* gc = 0;
     uint16_t gd = 0;
@@ -599,14 +609,32 @@ static void ApplyGloves(uintptr_t client, uintptr_t pawn) {
     if (!gc) { haveLast = 0; return; }
 
     uintptr_t wearables = *(uintptr_t*)(pawn + OFF_M_HMYWEARABLES);
-    if (!wearables) { haveLast = 0; return; }
-    int32_t count = *(int32_t*)(pawn + OFF_M_HMYWEARABLES + 8);
+    int32_t count = (wearables && safe_ptr(wearables)) ? *(int32_t*)(pawn + OFF_M_HMYWEARABLES + 8) : 0;
+
+    // One-time diagnostic: show the raw m_hMyWearables state so we can confirm
+    // the offset + CUtlVector layout are right on this build.
+    if (!dbgDone) {
+        dbgDone = 1;
+        DllLog("glove: cfg def=%u paint=%d wearables=%p count=%d", (unsigned)gd, gc->paint, (void*)wearables, count);
+        for (int i = 0; wearables && i < count && i < 16; i++) {
+            uint32_t h = *(uint32_t*)(wearables + (uintptr_t)i * 4);
+            uintptr_t e = ResolveEntity(client, h);
+            if (e && safe_ptr(e)) {
+                uint16_t d = *(uint16_t*)(e + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM + OFF_M_ITEMDEFINDEX);
+                DllLog("glove: wearable[%d] handle=0x%X entity=%p def=%u", i, h, (void*)e, (unsigned)d);
+            } else {
+                DllLog("glove: wearable[%d] handle=0x%X -> no entity", i, h);
+            }
+        }
+    }
+
+    if (!wearables || !safe_ptr(wearables)) { haveLast = 0; return; }
     if (count <= 0 || count > 16) { haveLast = 0; return; }
 
     for (int i = 0; i < count; i++) {
         uint32_t handle = *(uint32_t*)(wearables + (uintptr_t)i * 4);
         uintptr_t entity = ResolveEntity(client, handle);
-        if (!entity) continue;
+        if (!entity || !safe_ptr(entity)) continue;
         uintptr_t itemView = entity + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM;
         uint16_t def = *(uint16_t*)(itemView + OFF_M_ITEMDEFINDEX);
         if (!is_glove_def(def)) continue;
@@ -675,17 +703,17 @@ static void Loop() {
             continue;
         }
         uintptr_t pawn = *(uintptr_t*)(client + OFF_DW_LOCAL_PLAYER_PAWN);
-        if (!pawn) {
+        if (!pawn || !safe_ptr(pawn)) {
             Sleep(250);
             continue;
         }
 
         // --- active weapon / knife ---
         uintptr_t ws = *(uintptr_t*)(pawn + OFF_M_PWEAPONSERVICES);
-        if (ws) {
+        if (ws && safe_ptr(ws)) {
             uint32_t handle = *(uint32_t*)(ws + OFF_M_HACTIVEWEAPON);
             uintptr_t weapon = ResolveEntity(client, handle);
-            if (weapon) {
+            if (weapon && safe_ptr(weapon)) {
                 uintptr_t itemView = weapon + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM;
                 uint16_t def = *(uint16_t*)(itemView + OFF_M_ITEMDEFINDEX);
                 const int isKnife = is_knife_def(def);
