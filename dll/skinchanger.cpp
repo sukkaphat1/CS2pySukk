@@ -532,6 +532,29 @@ static void ApplyViewmodelMask(uintptr_t client, uintptr_t pawn, int meshMask) {
     }
 }
 
+// Set the model on the first-person viewmodel entity(s) hanging off the HUD
+// arms. A knife model swap must update these too, otherwise the subsequent
+// UpdateWeaponViewModel call finds an inconsistent viewmodel and corrupts it
+// (the earlier lag + crash when the butterfly knife was equipped).
+static void SetHudViewModel(uintptr_t client, uintptr_t pawn, const char* model) {
+    if (!model || !model[0] || !g_setModel) return;
+    uint32_t armsHandle = *(uint32_t*)(pawn + OFF_M_HHUDMODELARMS);
+    uintptr_t arms = ResolveEntity(client, armsHandle);
+    if (!arms || !safe_ptr(arms)) return;
+    uintptr_t sceneNode = *(uintptr_t*)(arms + OFF_M_PGAMESCENENODE);
+    if (!sceneNode || !safe_ptr(sceneNode)) return;
+    uintptr_t child = *(uintptr_t*)(sceneNode + 64);  // m_pChild
+    int guard = 0;
+    while (child && guard++ < 16) {
+        if (!safe_ptr(child)) break;
+        uintptr_t owner = *(uintptr_t*)(child + 48);  // m_pOwner -> C_BaseEntity
+        if (owner && safe_ptr(owner)) {
+            g_setModel((void*)owner, model);
+        }
+        child = *(uintptr_t*)(child + 72);  // m_pNextSibling
+    }
+}
+
 static uint32_t MakeSubclassToken(uint16_t defIndex) {
     // Murmur2 lowercase of the decimal def index (matches CS2's subclass id).
     char buf[8];
@@ -793,14 +816,17 @@ static void Loop() {
                         ApplySkin(weapon, pick, pickDef);
                         ApplyViewmodelMask(client, pawn, pick->meshMask);
                         if (isKnife && pick->model[0] && g_setModel) {
-                            // Model swap only. The old code also wrote
-                            // m_nSubclassID and called UpdateSubclass +
-                            // UpdateWeaponViewModel to drive the butterfly flip
-                            // animation, but those corrupted the viewmodel and
-                            // caused lag + crashes whenever the knife was out.
-                            // SetModel alone gives the knife skin + model; the
-                            // animation falls back to the default knife slash.
+                            // Full knife swap: world weapon model + the
+                            // first-person viewmodel(s) + subclass id. The
+                            // viewmodel model write is what was missing before
+                            // and caused UpdateWeaponViewModel to corrupt state.
                             g_setModel((void*)weapon, pick->model);
+                            SetHudViewModel(client, pawn, pick->model);
+                            // Subclass id = murmur2(decimal def index) drives
+                            // the knife animation class (butterfly flip).
+                            *(uint32_t*)(weapon + 896) = MakeSubclassToken(pickDef);  // m_nSubclassID
+                            if (g_updateSubclass) g_updateSubclass((void*)weapon);
+                            if (g_updateWeaponVm) g_updateWeaponVm((void*)weapon);
                         }
                         lastWeapon = weapon;
                         lastDef = pickDef;
