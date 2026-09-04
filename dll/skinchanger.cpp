@@ -44,9 +44,11 @@ extern "C" void* __cdecl memmove(void* dst, const void* src, SIZE_T n) {
 }
 
 // Offsets (current cs2-dumper dump)
+static const uintptr_t OFF_DW_GAMERULES         = 37510440;
 static const uintptr_t OFF_DW_LOCAL_PLAYER_PAWN = 37511784;
 static const uintptr_t OFF_DW_ENTITY_LIST      = 39260704;
 static const uintptr_t OFF_M_PWEAPONSERVICES   = 4616;
+static const uintptr_t OFF_M_HMYWEARABLES      = 4480;
 static const uintptr_t OFF_M_HACTIVEWEAPON     = 96;
 static const uintptr_t OFF_M_ATTRIBUTEMANAGER  = 4520;
 static const uintptr_t OFF_M_ITEM              = 80;
@@ -94,6 +96,17 @@ static int str_eq(const char* a, const char* b) {
         a++; b++;
     }
     return *a == *b;
+}
+
+// Knife item defs are 500-526 EXCEPT 5027-5035, which are gloves (they overlap
+// the knife range in items_game.txt). Gloves are a separate wearables entity.
+static int is_knife_def(uint16_t def) {
+    return def == 42 || def == 59 ||
+        (def >= 500 && def <= 526 && !(def >= 5027 && def <= 5035));
+}
+
+static int is_glove_def(uint16_t def) {
+    return (def >= 5027 && def <= 5035) || def == 4725;
 }
 
 // Writes the decimal representation of v into out, returns digit count.
@@ -548,6 +561,86 @@ static uint32_t MakeSubclassToken(uint16_t defIndex) {
     return h;
 }
 
+// ---- glove application --------------------------------------------------
+
+static void ApplyGloveSkin(uintptr_t entity, const SkinCfg* cfg, uint16_t defIndex) {
+    PokeFields(entity, cfg, defIndex);
+    uintptr_t itemView = entity + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM;
+    if (g_setAttr) {
+        g_setAttr((void*)itemView, "set item texture prefab", (float)cfg->paint);
+        g_setAttr((void*)itemView, "set item texture wear", cfg->wear);
+        g_setAttr((void*)itemView, "set item texture seed", (float)cfg->seed);
+    }
+    // NOTE: no UpdateSkin/UpdateCompositeMaterial here. Those are resolved to
+    // C_CSWeaponBase methods and would touch weapon-specific fields on a
+    // C_EconWearable (glove). The field + attribute writes above are enough.
+}
+
+// Find the glove wearable (C_EconWearable) via m_hMyWearables and apply the
+// configured glove skin, model-swapping when the glove type changes.
+static void ApplyGloves(uintptr_t client, uintptr_t pawn) {
+    static uintptr_t lastEntity = 0;
+    static uint16_t lastDef = 0;
+    static int lastPaint = -1;
+    static int lastSeed = -1;
+    static int lastMesh = -1;
+    static float lastWear = -1.0f;
+    static char lastModel[320];
+    static int haveLast = 0;
+
+    const SkinCfg* gc = 0;
+    uint16_t gd = 0;
+    for (int i = 0; i < g_skin_count; i++) {
+        if (is_glove_def(g_skins[i].def)) {
+            gc = &g_skins[i].cfg;
+            gd = g_skins[i].def;
+        }
+    }
+    if (!gc) { haveLast = 0; return; }
+
+    uintptr_t wearables = *(uintptr_t*)(pawn + OFF_M_HMYWEARABLES);
+    if (!wearables) { haveLast = 0; return; }
+    int32_t count = *(int32_t*)(pawn + OFF_M_HMYWEARABLES + 8);
+    if (count <= 0 || count > 16) { haveLast = 0; return; }
+
+    for (int i = 0; i < count; i++) {
+        uint32_t handle = *(uint32_t*)(wearables + (uintptr_t)i * 4);
+        uintptr_t entity = ResolveEntity(client, handle);
+        if (!entity) continue;
+        uintptr_t itemView = entity + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM;
+        uint16_t def = *(uint16_t*)(itemView + OFF_M_ITEMDEFINDEX);
+        if (!is_glove_def(def)) continue;
+
+        PokeFields(entity, gc, gd);
+
+        int changed = !haveLast
+            || entity != lastEntity
+            || gd != lastDef
+            || gc->paint != lastPaint
+            || gc->seed != lastSeed
+            || gc->wear != lastWear
+            || gc->meshMask != lastMesh
+            || !str_eq(gc->model, lastModel);
+
+        if (changed) {
+            DllLog("glove: def=%u paint=%d seed=%d wear=%.3f mesh=%d model=%s entity=%p",
+                (unsigned)def, gc->paint, gc->seed, gc->wear, gc->meshMask, gc->model, (void*)entity);
+            ApplyGloveSkin(entity, gc, gd);
+            if (gc->model[0] && g_setModel) {
+                g_setModel((void*)entity, gc->model);
+            }
+            lastEntity = entity;
+            lastDef = gd;
+            lastPaint = gc->paint;
+            lastSeed = gc->seed;
+            lastWear = gc->wear;
+            lastMesh = gc->meshMask;
+            copy_str(lastModel, gc->model, (int)sizeof(lastModel));
+            haveLast = 1;
+        }
+    }
+}
+
 // ---- main loop ----------------------------------------------------------
 
 static void Loop() {
@@ -572,96 +665,105 @@ static void Loop() {
 
     while (true) {
         ReadConfig();
+
+        // When the game rules are gone we are not in a live match (main menu,
+        // map loading/unloading). Touching entity memory during teardown was
+        // crashing cs2 (access violation) on "exit to main menu" / match end.
+        uintptr_t gameRules = *(uintptr_t*)(client + OFF_DW_GAMERULES);
+        if (!gameRules) {
+            Sleep(250);
+            continue;
+        }
         uintptr_t pawn = *(uintptr_t*)(client + OFF_DW_LOCAL_PLAYER_PAWN);
         if (!pawn) {
             Sleep(250);
             continue;
         }
+
+        // --- active weapon / knife ---
         uintptr_t ws = *(uintptr_t*)(pawn + OFF_M_PWEAPONSERVICES);
-        if (!ws) {
-            Sleep(100);
-            continue;
-        }
-        uint32_t handle = *(uint32_t*)(ws + OFF_M_HACTIVEWEAPON);
-        uintptr_t weapon = ResolveEntity(client, handle);
-        if (!weapon) {
-            Sleep(100);
-            continue;
-        }
-        uintptr_t itemView = weapon + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM;
-        uint16_t def = *(uint16_t*)(itemView + OFF_M_ITEMDEFINDEX);
-        const int isKnife = (def == 42 || def == 59 || (def >= 500 && def <= 526));
+        if (ws) {
+            uint32_t handle = *(uint32_t*)(ws + OFF_M_HACTIVEWEAPON);
+            uintptr_t weapon = ResolveEntity(client, handle);
+            if (weapon) {
+                uintptr_t itemView = weapon + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM;
+                uint16_t def = *(uint16_t*)(itemView + OFF_M_ITEMDEFINDEX);
+                const int isKnife = is_knife_def(def);
 
-        AcquireSRWLockShared(&g_lock);
-        const SkinCfg* pick = 0;
-        uint16_t pickDef = 0;
-        if (isKnife) {
-            // Knives: apply the most recently configured knife (last knife entry
-            // in the file), model-swapping as needed. This lets the GUI switch
-            // the held knife's model/skin immediately.
-            for (int i = 0; i < g_skin_count; i++) {
-                if (g_skins[i].def >= 500 && g_skins[i].def <= 526) {
-                    pick = &g_skins[i].cfg;
-                    pickDef = g_skins[i].def;
+                AcquireSRWLockShared(&g_lock);
+                const SkinCfg* pick = 0;
+                uint16_t pickDef = 0;
+                if (isKnife) {
+                    // Knives: apply the most recently configured knife (last
+                    // knife entry in the file), model-swapping as needed.
+                    for (int i = 0; i < g_skin_count; i++) {
+                        if (is_knife_def(g_skins[i].def)) {
+                            pick = &g_skins[i].cfg;
+                            pickDef = g_skins[i].def;
+                        }
+                    }
+                } else {
+                    for (int i = 0; i < g_skin_count; i++) {
+                        if (g_skins[i].def != def) continue;
+                        pick = &g_skins[i].cfg;
+                        pickDef = def;
+                        break;
+                    }
                 }
-            }
-        } else {
-            for (int i = 0; i < g_skin_count; i++) {
-                if (g_skins[i].def != def) continue;
-                pick = &g_skins[i].cfg;
-                pickDef = def;
-                break;
+
+                if (!pick) {
+                    haveLast = 0;
+                } else {
+                    // Cheap field re-write every tick keeps the fallback/item
+                    // fields correct even if the game resets them.
+                    PokeFields(weapon, pick, pickDef);
+
+                    // The expensive game functions (SetAttributeValueByName,
+                    // UpdateSkin, UpdateCompositeMaterial, SetModel,
+                    // UpdateSubclass, UpdateWeaponVm) only run when the target
+                    // actually changes. Hammering them every 100ms leaked or
+                    // corrupted game state and crashed cs2.
+                    int changed = !haveLast
+                        || weapon != lastWeapon
+                        || pickDef != lastDef
+                        || pick->paint != lastPaint
+                        || pick->seed != lastSeed
+                        || pick->wear != lastWear
+                        || pick->meshMask != lastMesh
+                        || !str_eq(pick->model, lastModel);
+
+                    if (changed) {
+                        DllLog("apply: def=%u paint=%d seed=%d wear=%.3f mesh=%d model=%s weapon=%p",
+                            (unsigned)def, pick->paint, pick->seed, pick->wear, pick->meshMask, pick->model, (void*)weapon);
+                        ApplySkin(weapon, pick, pickDef);
+                        ApplyViewmodelMask(client, pawn, pick->meshMask);
+                        if (isKnife && pick->model[0] && g_setModel) {
+                            g_setModel((void*)weapon, pick->model);
+                            // Subclass id + refresh drives the knife's animation
+                            // class (e.g. butterfly flip instead of default slash).
+                            *(uint32_t*)(weapon + 896) = MakeSubclassToken(pickDef);  // m_nSubclassID
+                            if (g_updateSubclass) g_updateSubclass((void*)weapon);
+                            if (g_updateWeaponVm) g_updateWeaponVm((void*)weapon);
+                        }
+                        lastWeapon = weapon;
+                        lastDef = pickDef;
+                        lastPaint = pick->paint;
+                        lastSeed = pick->seed;
+                        lastWear = pick->wear;
+                        lastMesh = pick->meshMask;
+                        copy_str(lastModel, pick->model, (int)sizeof(lastModel));
+                        haveLast = 1;
+                    }
+                }
+                ReleaseSRWLockShared(&g_lock);
             }
         }
 
-        if (!pick) {
-            ReleaseSRWLockShared(&g_lock);
-            haveLast = 0;
-            Sleep(100);
-            continue;
-        }
-
-        // Cheap field re-write every tick keeps the fallback/item fields
-        // correct even if the game resets them (and keeps the skin visible).
-        PokeFields(weapon, pick, pickDef);
-
-        // The expensive game functions (SetAttributeValueByName, UpdateSkin,
-        // UpdateCompositeMaterial, SetModel, UpdateSubclass, UpdateWeaponVm)
-        // only run when the target actually changes. Hammering them every
-        // 100ms leaked/corrupted game state and crashed cs2 after a few
-        // minutes; running them once per change avoids that.
-        int changed = !haveLast
-            || weapon != lastWeapon
-            || pickDef != lastDef
-            || pick->paint != lastPaint
-            || pick->seed != lastSeed
-            || pick->wear != lastWear
-            || pick->meshMask != lastMesh
-            || !str_eq(pick->model, lastModel);
-
-        if (changed) {
-            DllLog("apply: def=%u paint=%d seed=%d wear=%.3f mesh=%d model=%s weapon=%p",
-                (unsigned)def, pick->paint, pick->seed, pick->wear, pick->meshMask, pick->model, (void*)weapon);
-            ApplySkin(weapon, pick, pickDef);
-            ApplyViewmodelMask(client, pawn, pick->meshMask);
-            if (isKnife && pick->model[0] && g_setModel) {
-                g_setModel((void*)weapon, pick->model);
-                // Subclass id + refresh drives the knife's animation class
-                // (e.g. butterfly flip instead of default knife slash).
-                *(uint32_t*)(weapon + 896) = MakeSubclassToken(pickDef);  // m_nSubclassID
-                if (g_updateSubclass) g_updateSubclass((void*)weapon);
-                if (g_updateWeaponVm) g_updateWeaponVm((void*)weapon);
-            }
-            lastWeapon = weapon;
-            lastDef = pickDef;
-            lastPaint = pick->paint;
-            lastSeed = pick->seed;
-            lastWear = pick->wear;
-            lastMesh = pick->meshMask;
-            copy_str(lastModel, pick->model, (int)sizeof(lastModel));
-            haveLast = 1;
-        }
+        // --- gloves (wearable entity, independent of the active weapon) ---
+        AcquireSRWLockShared(&g_lock);
+        ApplyGloves(client, pawn);
         ReleaseSRWLockShared(&g_lock);
+
         Sleep(100);
     }
 }
