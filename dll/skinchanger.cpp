@@ -598,6 +598,7 @@ static void ApplyGloves(uintptr_t client, uintptr_t pawn) {
     static char lastModel[320];
     static int haveLast = 0;
     static int dbgDone = 0;
+    static uint64_t lastPokeTick = 0;
 
     const SkinCfg* gc = 0;
     uint16_t gd = 0;
@@ -662,8 +663,6 @@ static void ApplyGloves(uintptr_t client, uintptr_t pawn) {
         uint16_t def = *(uint16_t*)(itemView + OFF_M_ITEMDEFINDEX);
         if (!is_glove_def(def)) continue;
 
-        PokeFields(entity, gc, gd);
-
         int changed = !haveLast
             || entity != lastEntity
             || gd != lastDef
@@ -672,6 +671,7 @@ static void ApplyGloves(uintptr_t client, uintptr_t pawn) {
             || gc->wear != lastWear
             || gc->meshMask != lastMesh
             || !str_eq(gc->model, lastModel);
+        uint64_t now = GetTickCount64();
 
         if (changed) {
             DllLog("glove: def=%u paint=%d seed=%d wear=%.3f mesh=%d model=%s entity=%p",
@@ -688,6 +688,10 @@ static void ApplyGloves(uintptr_t client, uintptr_t pawn) {
             lastMesh = gc->meshMask;
             copy_str(lastModel, gc->model, (int)sizeof(lastModel));
             haveLast = 1;
+            lastPokeTick = now;
+        } else if (now - lastPokeTick >= 2000) {
+            PokeFields(entity, gc, gd);
+            lastPokeTick = now;
         }
     }
 }
@@ -713,6 +717,7 @@ static void Loop() {
     char lastModel[320];
     lastModel[0] = 0;
     int haveLast = 0;
+    uint64_t lastPokeTick = 0;
 
     while (true) {
         ReadConfig();
@@ -765,15 +770,13 @@ static void Loop() {
                 if (!pick) {
                     haveLast = 0;
                 } else {
-                    // Cheap field re-write every tick keeps the fallback/item
-                    // fields correct even if the game resets them.
-                    PokeFields(weapon, pick, pickDef);
-
                     // The expensive game functions (SetAttributeValueByName,
                     // UpdateSkin, UpdateCompositeMaterial, SetModel,
                     // UpdateSubclass, UpdateWeaponVm) only run when the target
-                    // actually changes. Hammering them every 100ms leaked or
-                    // corrupted game state and crashed cs2.
+                    // actually changes. The cheap field writes (PokeFields) also
+                    // run only on change now, plus a light 2s re-poke so a rare
+                    // game-side reset still gets corrected without hammering the
+                    // entity every frame (which caused input hitches).
                     int changed = !haveLast
                         || weapon != lastWeapon
                         || pickDef != lastDef
@@ -782,6 +785,7 @@ static void Loop() {
                         || pick->wear != lastWear
                         || pick->meshMask != lastMesh
                         || !str_eq(pick->model, lastModel);
+                    uint64_t now = GetTickCount64();
 
                     if (changed) {
                         DllLog("apply: def=%u paint=%d seed=%d wear=%.3f mesh=%d model=%s weapon=%p",
@@ -804,6 +808,10 @@ static void Loop() {
                         lastMesh = pick->meshMask;
                         copy_str(lastModel, pick->model, (int)sizeof(lastModel));
                         haveLast = 1;
+                        lastPokeTick = now;
+                    } else if (now - lastPokeTick >= 2000) {
+                        PokeFields(weapon, pick, pickDef);
+                        lastPokeTick = now;
                     }
                 }
                 ReleaseSRWLockShared(&g_lock);
@@ -815,7 +823,7 @@ static void Loop() {
         ApplyGloves(client, pawn);
         ReleaseSRWLockShared(&g_lock);
 
-        Sleep(100);
+        Sleep(250);
     }
 }
 
