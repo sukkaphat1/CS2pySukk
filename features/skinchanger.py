@@ -277,6 +277,8 @@ def _set_skin_attributes(processHandle, item_view, Offsets, paint_kit, seed, wea
 
 
 _last_cfg_write = 0.0
+_last_cfg_content = None
+_last_weapons_sig = None
 
 _CONFIG_PATH = os.path.join(os.path.expanduser("~"), "cs2py_skin.txt")
 _DEBUG_LOG = os.path.join(os.path.expanduser("~"), "cs2py_skin_debug.log")
@@ -296,7 +298,7 @@ def _log(msg):
 
 def _write_skin_config(Options):
     """Write the skin config to %USERPROFILE%\\cs2py_skin.txt for the injected DLL."""
-    global _last_cfg_write
+    global _last_cfg_write, _last_cfg_content
     now = time.monotonic()
     if now - _last_cfg_write < 1.0:
         return
@@ -318,8 +320,12 @@ def _write_skin_config(Options):
             mesh_mask = 2 if pk.get("legacy") else 1
             model = w.get("model") or "-"
             lines.append(f"{w['def_index']} {skin.get('paint_kit', 0)} {skin.get('seed', 0)} {skin.get('wear', 0.0)} {mesh_mask} {model}")
+        content = "\n".join(lines) + ("\n" if lines else "")
+        if content == _last_cfg_content:
+            return  # unchanged: skip the rewrite + log spam
+        _last_cfg_content = content
         with open(_CONFIG_PATH, "w") as f:
-            f.write("\n".join(lines) + ("\n" if lines else ""))
+            f.write(content)
         print(f"[skin-changer] wrote {len(lines)} skin config line(s)")
         _log(f"write ok: {len(lines)} line(s) -> " + " | ".join(lines))
     except Exception as e:
@@ -332,7 +338,7 @@ _last_disabled_log = 0.0
 
 def SkinChanger_Update(processHandle, clientBaseAddress, Offsets, Options):
     """Inject the internal skin changer DLL and keep its config file fresh."""
-    global _last_disabled_log
+    global _last_disabled_log, _last_weapons_sig
     cfg = Options.get("SkinChanger", {}) or {}
     if not cfg.get("enabled", False):
         now = time.monotonic()
@@ -340,7 +346,13 @@ def SkinChanger_Update(processHandle, clientBaseAddress, Offsets, Options):
             _last_disabled_log = now
             _log("update: SkinChanger disabled, skipping")
         return
-    _log(f"update: enabled, weapons={cfg.get('weapons', {})}")
+    # Log only when the configured weapons actually change (this was spamming
+    # the console + debug log every frame).
+    weapons = cfg.get("weapons", {}) or {}
+    sig = repr(sorted(weapons.items()))
+    if sig != _last_weapons_sig:
+        _last_weapons_sig = sig
+        _log(f"update: enabled, weapons={weapons}")
     inject.inject_skinchanger(processHandle)
     _write_skin_config(Options)
 

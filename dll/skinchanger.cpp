@@ -88,6 +88,14 @@ static void build_path(char* out, int cap, const char* dir, const char* file) {
 
 static char lower_c(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
 
+static int str_eq(const char* a, const char* b) {
+    while (*a && *b) {
+        if (*a != *b) return 0;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
 // Writes the decimal representation of v into out, returns digit count.
 static int u32toa(char* out, uint32_t v) {
     char tmp[12];
@@ -430,7 +438,9 @@ static uintptr_t ResolveEntity(uintptr_t client, uint32_t handle) {
 
 // ---- skin application ---------------------------------------------------
 
-static void ApplySkin(uintptr_t weapon, const SkinCfg* cfg, uint16_t defIndex) {
+static void PokeFields(uintptr_t weapon, const SkinCfg* cfg, uint16_t defIndex) {
+    // Cheap direct memory writes only (no game function calls). Safe to run
+    // every tick to resist the game resetting the fallback fields.
     uintptr_t itemView = weapon + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM;
     uint32_t accountId = *(uint32_t*)(weapon + OFF_M_OWNERXUIDLOW);
     if (!accountId) accountId = 1;
@@ -450,6 +460,11 @@ static void ApplySkin(uintptr_t weapon, const SkinCfg* cfg, uint16_t defIndex) {
     *(int32_t*)(weapon + OFF_M_FALLBACKSEED) = cfg->seed;
     *(float*)(weapon + OFF_M_FALLBACKWEAR) = cfg->wear;
     *(int32_t*)(weapon + OFF_M_FALLBACKSTATTRAK) = -1;
+}
+
+static void ApplySkin(uintptr_t weapon, const SkinCfg* cfg, uint16_t defIndex) {
+    uintptr_t itemView = weapon + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM;
+    PokeFields(weapon, cfg, defIndex);
 
     // Mesh group mask via the game's own setter (does the mesh refresh).
     if (g_setMask) {
@@ -545,9 +560,15 @@ static void Loop() {
     ResolveFunctions();
     DllLog("loop: entering main loop, skins=%d", g_skin_count);
 
-    static uint16_t s_lastDef = 0xFFFF;
-    static int s_lastPaint = -1;
-    static int s_lastKnife = -1;
+    uintptr_t lastWeapon = 0;
+    uint16_t lastDef = 0;
+    int lastPaint = -1;
+    int lastSeed = -1;
+    int lastMesh = -1;
+    float lastWear = -1.0f;
+    char lastModel[320];
+    lastModel[0] = 0;
+    int haveLast = 0;
 
     while (true) {
         ReadConfig();
@@ -572,59 +593,74 @@ static void Loop() {
         const int isKnife = (def == 42 || def == 59 || (def >= 500 && def <= 526));
 
         AcquireSRWLockShared(&g_lock);
-        int applied = 0;
-        int appliedPaint = -1;
+        const SkinCfg* pick = 0;
+        uint16_t pickDef = 0;
         if (isKnife) {
             // Knives: apply the most recently configured knife (last knife entry
             // in the file), model-swapping as needed. This lets the GUI switch
             // the held knife's model/skin immediately.
-            const SkinCfg* pick = 0;
-            uint16_t pickDef = 0;
             for (int i = 0; i < g_skin_count; i++) {
                 if (g_skins[i].def >= 500 && g_skins[i].def <= 526) {
                     pick = &g_skins[i].cfg;
                     pickDef = g_skins[i].def;
                 }
             }
-            if (pick) {
-                if (!(def == s_lastDef && pick->paint == s_lastPaint && 1 == s_lastKnife))
-                    DllLog("apply: def=%u paint=%d seed=%d wear=%.3f mesh=%d model=%s weapon=%p",
-                        (unsigned)def, pick->paint, pick->seed, pick->wear, pick->meshMask, pick->model, (void*)weapon);
-                ApplySkin(weapon, pick, pickDef);
-                ApplyViewmodelMask(client, pawn, pick->meshMask);
-                if (pick->model[0] && g_setModel) {
-                    g_setModel((void*)weapon, pick->model);
-                    // Subclass id + refresh drives the knife's animation class
-                    // (e.g. butterfly flip instead of default knife slash).
-                    *(uint32_t*)(weapon + 896) = MakeSubclassToken(pickDef);  // m_nSubclassID
-                    if (g_updateSubclass) g_updateSubclass((void*)weapon);
-                    if (g_updateWeaponVm) g_updateWeaponVm((void*)weapon);
-                }
-                applied = 1;
-                appliedPaint = pick->paint;
-            }
         } else {
             for (int i = 0; i < g_skin_count; i++) {
                 if (g_skins[i].def != def) continue;
-                const SkinCfg* cfg = &g_skins[i].cfg;
-                if (!(def == s_lastDef && cfg->paint == s_lastPaint && 0 == s_lastKnife))
-                    DllLog("apply: def=%u paint=%d seed=%d wear=%.3f mesh=%d model=%s weapon=%p",
-                        (unsigned)def, cfg->paint, cfg->seed, cfg->wear, cfg->meshMask, cfg->model, (void*)weapon);
-                ApplySkin(weapon, cfg, def);
-                ApplyViewmodelMask(client, pawn, cfg->meshMask);
-                applied = 1;
-                appliedPaint = cfg->paint;
+                pick = &g_skins[i].cfg;
+                pickDef = def;
                 break;
             }
         }
-        if (!applied) {
-            if (!(def == s_lastDef && -1 == s_lastPaint && isKnife == s_lastKnife))
-                DllLog("nomatch: def=%u isKnife=%d skins=%d", (unsigned)def, isKnife, g_skin_count);
-            appliedPaint = -1;
+
+        if (!pick) {
+            ReleaseSRWLockShared(&g_lock);
+            haveLast = 0;
+            Sleep(100);
+            continue;
         }
-        s_lastDef = def;
-        s_lastPaint = appliedPaint;
-        s_lastKnife = isKnife;
+
+        // Cheap field re-write every tick keeps the fallback/item fields
+        // correct even if the game resets them (and keeps the skin visible).
+        PokeFields(weapon, pick, pickDef);
+
+        // The expensive game functions (SetAttributeValueByName, UpdateSkin,
+        // UpdateCompositeMaterial, SetModel, UpdateSubclass, UpdateWeaponVm)
+        // only run when the target actually changes. Hammering them every
+        // 100ms leaked/corrupted game state and crashed cs2 after a few
+        // minutes; running them once per change avoids that.
+        int changed = !haveLast
+            || weapon != lastWeapon
+            || pickDef != lastDef
+            || pick->paint != lastPaint
+            || pick->seed != lastSeed
+            || pick->wear != lastWear
+            || pick->meshMask != lastMesh
+            || !str_eq(pick->model, lastModel);
+
+        if (changed) {
+            DllLog("apply: def=%u paint=%d seed=%d wear=%.3f mesh=%d model=%s weapon=%p",
+                (unsigned)def, pick->paint, pick->seed, pick->wear, pick->meshMask, pick->model, (void*)weapon);
+            ApplySkin(weapon, pick, pickDef);
+            ApplyViewmodelMask(client, pawn, pick->meshMask);
+            if (isKnife && pick->model[0] && g_setModel) {
+                g_setModel((void*)weapon, pick->model);
+                // Subclass id + refresh drives the knife's animation class
+                // (e.g. butterfly flip instead of default knife slash).
+                *(uint32_t*)(weapon + 896) = MakeSubclassToken(pickDef);  // m_nSubclassID
+                if (g_updateSubclass) g_updateSubclass((void*)weapon);
+                if (g_updateWeaponVm) g_updateWeaponVm((void*)weapon);
+            }
+            lastWeapon = weapon;
+            lastDef = pickDef;
+            lastPaint = pick->paint;
+            lastSeed = pick->seed;
+            lastWear = pick->wear;
+            lastMesh = pick->meshMask;
+            copy_str(lastModel, pick->model, (int)sizeof(lastModel));
+            haveLast = 1;
+        }
         ReleaseSRWLockShared(&g_lock);
         Sleep(100);
     }
