@@ -452,9 +452,9 @@ static void ReadConfig() {
 static uintptr_t ResolveEntity(uintptr_t client, uint32_t handle) {
     if (!handle || handle == 0xFFFFFFFFu) return 0;
     uintptr_t entityList = *(uintptr_t*)(client + OFF_DW_ENTITY_LIST);
-    if (!entityList) return 0;
+    if (!entityList || !safe_ptr(entityList)) return 0;
     uintptr_t listEntry = *(uintptr_t*)(entityList + 0x8 * ((handle & 0x7FFF) >> 9) + 0x10);
-    if (!listEntry) return 0;
+    if (!listEntry || !safe_ptr(listEntry)) return 0;
     return *(uintptr_t*)(listEntry + 0x70 * (handle & 0x1FF));
 }
 
@@ -491,7 +491,7 @@ static void ApplySkin(uintptr_t weapon, const SkinCfg* cfg, uint16_t defIndex) {
     // Mesh group mask via the game's own setter (does the mesh refresh).
     if (g_setMask) {
         uintptr_t wSceneNode = *(uintptr_t*)(weapon + OFF_M_PGAMESCENENODE);
-        if (wSceneNode) g_setMask((void*)wSceneNode, (uint64_t)cfg->meshMask);
+        if (wSceneNode && safe_ptr(wSceneNode)) g_setMask((void*)wSceneNode, (uint64_t)cfg->meshMask);
     }
 
     if (g_setAttr) {
@@ -523,6 +523,7 @@ static void ApplyViewmodelMask(uintptr_t client, uintptr_t pawn, int meshMask) {
     uintptr_t child = *(uintptr_t*)(sceneNode + 64);  // m_pChild
     int guard = 0;
     while (child && guard++ < 16) {
+        if (!safe_ptr(child)) break;
         if (g_setMask)
             g_setMask((void*)child, (uint64_t)meshMask);
         else

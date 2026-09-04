@@ -44,7 +44,7 @@ _sel_weapon = 0
 _sel_skin = 0
 _scroll_weapons = 0
 _scroll_skins = 0
-_seed_text = "0"
+_seed_text = "1"
 _wear = 0.01
 
 _TABS = ["Skins", "Aimbot", "ESP & Visuals", "Triggerbot", "Reactions", "Recoil", "Colors", "Misc"]
@@ -160,6 +160,16 @@ def _draw_skins_tab(proc, clientBase, Options, Offsets):
         _sel_weapon = sel_w
         _sel_skin = 0
         _scroll_skins = 0
+        # Load this weapon's saved seed/wear into the inputs so re-selecting a
+        # skin doesn't clobber a saved seed back to the default.
+        wname = weapons[_sel_weapon]["name"]
+        saved = (Options.get("SkinChanger", {}) or {}).get("weapons", {}).get(wname)
+        if saved:
+            _seed_text = str(int(saved.get("seed", 1)))
+            _wear = float(saved.get("wear", 0.01))
+        else:
+            _seed_text = "1"
+            _wear = 0.01
 
     # --- skin column ---
     def skin_row(idx, x, y, w, h):
@@ -175,7 +185,7 @@ def _draw_skins_tab(proc, clientBase, Options, Offsets):
             try:
                 seed = int(_seed_text.strip())
             except (ValueError, TypeError):
-                seed = 0
+                seed = 1
             _apply_selection(Options, weapons[_sel_weapon], skins[_sel_skin], seed=seed, wear=_wear)
 
     # --- preview / info panel ---
@@ -205,7 +215,7 @@ def _draw_skins_tab(proc, clientBase, Options, Offsets):
         pme.gui_label(PREVIEW_X + 8.0, PREVIEW_Y + 8.0, PREVIEW_W - 16.0, 20.0, "No skins")
 
 
-def _apply_selection(Options, weapon, skin, seed=0, wear=0.0):
+def _apply_selection(Options, weapon, skin, seed=1, wear=0.0):
     """Persist the chosen paint kit for this weapon into the config."""
     quality = 3 if weapon["category"] == "knives" else 0
     cfg = dict(Options.get("SkinChanger", {}) or {})
