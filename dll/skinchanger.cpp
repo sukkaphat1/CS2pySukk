@@ -98,6 +98,19 @@ static int str_eq(const char* a, const char* b) {
     return *a == *b;
 }
 
+static int str_contains(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return 0;
+    if (!*needle) return 1;
+    while (*haystack) {
+        const char* h = haystack;
+        const char* n = needle;
+        while (*h && *n && *h == *n) { h++; n++; }
+        if (!*n) return 1;
+        haystack++;
+    }
+    return 0;
+}
+
 // Knife item defs are 500-526 EXCEPT 5027-5035, which are gloves (they overlap
 // the knife range in items_game.txt). Gloves are a separate wearables entity.
 static int is_knife_def(uint16_t def) {
@@ -532,11 +545,12 @@ static void ApplyViewmodelMask(uintptr_t client, uintptr_t pawn, int meshMask) {
     }
 }
 
-// Set the model on the first-person viewmodel entity(s) hanging off the HUD
-// arms. A knife model swap must update these too, otherwise the subsequent
-// UpdateWeaponViewModel call finds an inconsistent viewmodel and corrupts it
-// (the earlier lag + crash when the butterfly knife was equipped).
-static void SetHudViewModel(uintptr_t client, uintptr_t pawn, const char* model) {
+// Set the model on the first-person KNIFE viewmodel entity (the HUD arms
+// scene-node child whose model name contains "knife"). A knife model swap must
+// update this too, otherwise UpdateWeaponViewModel finds an inconsistent
+// viewmodel and corrupts it. We deliberately skip the gun viewmodels so they
+// keep their own model after switching back to a gun.
+static void SetKnifeHudViewModel(uintptr_t client, uintptr_t pawn, const char* model) {
     if (!model || !model[0] || !g_setModel) return;
     uint32_t armsHandle = *(uint32_t*)(pawn + OFF_M_HHUDMODELARMS);
     uintptr_t arms = ResolveEntity(client, armsHandle);
@@ -547,9 +561,14 @@ static void SetHudViewModel(uintptr_t client, uintptr_t pawn, const char* model)
     int guard = 0;
     while (child && guard++ < 16) {
         if (!safe_ptr(child)) break;
-        uintptr_t owner = *(uintptr_t*)(child + 48);  // m_pOwner -> C_BaseEntity
-        if (owner && safe_ptr(owner)) {
-            g_setModel((void*)owner, model);
+        // CModelState m_ModelName (CUtlString) at sceneNode + m_modelState(320)
+        // + m_ModelName(168); its data pointer is the model path.
+        const char* mn = (const char*)*(uintptr_t*)(child + OFF_M_MODELSTATE + 168);
+        if (mn && safe_ptr((uintptr_t)mn) && str_contains(mn, "knife")) {
+            uintptr_t owner = *(uintptr_t*)(child + 48);  // m_pOwner -> C_BaseEntity
+            if (owner && safe_ptr(owner)) {
+                g_setModel((void*)owner, model);
+            }
         }
         child = *(uintptr_t*)(child + 72);  // m_pNextSibling
     }
@@ -821,7 +840,7 @@ static void Loop() {
                             // viewmodel model write is what was missing before
                             // and caused UpdateWeaponViewModel to corrupt state.
                             g_setModel((void*)weapon, pick->model);
-                            SetHudViewModel(client, pawn, pick->model);
+                            SetKnifeHudViewModel(client, pawn, pick->model);
                             // Subclass id = murmur2(decimal def index) drives
                             // the knife animation class (butterfly flip).
                             *(uint32_t*)(weapon + 896) = MakeSubclassToken(pickDef);  // m_nSubclassID
