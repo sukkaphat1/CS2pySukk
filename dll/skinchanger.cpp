@@ -793,12 +793,14 @@ static void Loop() {
                         ApplySkin(weapon, pick, pickDef);
                         ApplyViewmodelMask(client, pawn, pick->meshMask);
                         if (isKnife && pick->model[0] && g_setModel) {
+                            // Model swap only. The old code also wrote
+                            // m_nSubclassID and called UpdateSubclass +
+                            // UpdateWeaponViewModel to drive the butterfly flip
+                            // animation, but those corrupted the viewmodel and
+                            // caused lag + crashes whenever the knife was out.
+                            // SetModel alone gives the knife skin + model; the
+                            // animation falls back to the default knife slash.
                             g_setModel((void*)weapon, pick->model);
-                            // Subclass id + refresh drives the knife's animation
-                            // class (e.g. butterfly flip instead of default slash).
-                            *(uint32_t*)(weapon + 896) = MakeSubclassToken(pickDef);  // m_nSubclassID
-                            if (g_updateSubclass) g_updateSubclass((void*)weapon);
-                            if (g_updateWeaponVm) g_updateWeaponVm((void*)weapon);
                         }
                         lastWeapon = weapon;
                         lastDef = pickDef;
