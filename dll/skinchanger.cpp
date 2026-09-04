@@ -1,116 +1,282 @@
-// skinchanger.cpp - internal CS2 skin changer (injected DLL).
-// Reads C:\cs2py_skin.txt (lines: "defIndex paintKit seed wear") and applies
-// the configured skin to the local player's active weapon using the game's own
-// SetAttributeValueByName + UpdateSkin (in-process, so it renders correctly).
+// skinchanger.cpp - internal CS2 skin changer (manually-mapped DLL).
+//
+// Built CRT-free (/NODEFAULTLIB, /ENTRY:DllMain) so it can be manually mapped
+// into cs2.exe without depending on the C runtime's DllMain startup. It only
+// imports kernel32 functions. It reads %USERPROFILE%\cs2py_skin.txt (lines:
+// "defIndex paintKit seed wear meshMask model") and applies the configured skin
+// to the local player's active weapon in-process.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
 #include <windows.h>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstdarg>
-#include <cstring>
-#include <thread>
-#include <vector>
-#include <string>
-#include <fstream>
-#include <sstream>
-#include <mutex>
+#include <stdint.h>
+#include <stdarg.h>
+
+// Satisfies the compiler's floating-point marker when linking without the CRT.
+extern "C" int _fltused = 0;
+
+// Minimal CRT substitutes for the few libc helpers the compiler may still emit
+// (struct copies / zeroing) in a CRT-free build. Implemented here so we never
+// link the C runtime. On x64 the linker matches these by symbol name only.
+#pragma function(memset, memcpy, memmove)
+extern "C" void* __cdecl memset(void* dst, int c, SIZE_T n) {
+    unsigned char* d = (unsigned char*)dst;
+    for (SIZE_T i = 0; i < n; i++) d[i] = (unsigned char)c;
+    return dst;
+}
+
+extern "C" void* __cdecl memcpy(void* dst, const void* src, SIZE_T n) {
+    unsigned char* d = (unsigned char*)dst;
+    const unsigned char* s = (const unsigned char*)src;
+    for (SIZE_T i = 0; i < n; i++) d[i] = s[i];
+    return dst;
+}
+
+extern "C" void* __cdecl memmove(void* dst, const void* src, SIZE_T n) {
+    unsigned char* d = (unsigned char*)dst;
+    const unsigned char* s = (const unsigned char*)src;
+    if (d < s) { for (SIZE_T i = 0; i < n; i++) d[i] = s[i]; }
+    else { for (SIZE_T i = n; i > 0; i--) d[i - 1] = s[i - 1]; }
+    return dst;
+}
 
 // Offsets (current cs2-dumper dump)
-static constexpr uintptr_t OFF_DW_LOCAL_PLAYER_PAWN = 37511784;
-static constexpr uintptr_t OFF_DW_ENTITY_LIST      = 39260704;
-static constexpr uintptr_t OFF_M_PWEAPONSERVICES   = 4616;
-static constexpr uintptr_t OFF_M_HACTIVEWEAPON     = 96;
-static constexpr uintptr_t OFF_M_ATTRIBUTEMANAGER  = 4520;
-static constexpr uintptr_t OFF_M_ITEM              = 80;
-static constexpr uintptr_t OFF_M_ITEMDEFINDEX      = 442;
-static constexpr uintptr_t OFF_M_ENTITYQUALITY     = 444;
-static constexpr uintptr_t OFF_M_ITEMID            = 456;
-static constexpr uintptr_t OFF_M_ITEMIDHIGH        = 464;
-static constexpr uintptr_t OFF_M_ITEMIDLOW         = 468;
-static constexpr uintptr_t OFF_M_ACCOUNTID         = 472;
-static constexpr uintptr_t OFF_M_BDISALLOWSOC      = 489;
-static constexpr uintptr_t OFF_M_BINITIALIZED      = 488;
-static constexpr uintptr_t OFF_M_BRESTORECUSTOM    = 440;
-static constexpr uintptr_t OFF_M_OWNERXUIDLOW      = 5752;
-static constexpr uintptr_t OFF_M_OWNERXUIDHIGH     = 5756;
-static constexpr uintptr_t OFF_M_FALLBACKPAINTKIT  = 5760;
-static constexpr uintptr_t OFF_M_FALLBACKSEED      = 5764;
-static constexpr uintptr_t OFF_M_FALLBACKWEAR      = 5768;
-static constexpr uintptr_t OFF_M_FALLBACKSTATTRAK  = 5772;
-static constexpr uintptr_t OFF_M_PGAMESCENENODE    = 816;
-static constexpr uintptr_t OFF_M_MODELSTATE        = 320;
-static constexpr uintptr_t OFF_M_MESHGROUPMASK     = 520;
-static constexpr uintptr_t OFF_M_HHUDMODELARMS     = 7044;
+static const uintptr_t OFF_DW_LOCAL_PLAYER_PAWN = 37511784;
+static const uintptr_t OFF_DW_ENTITY_LIST      = 39260704;
+static const uintptr_t OFF_M_PWEAPONSERVICES   = 4616;
+static const uintptr_t OFF_M_HACTIVEWEAPON     = 96;
+static const uintptr_t OFF_M_ATTRIBUTEMANAGER  = 4520;
+static const uintptr_t OFF_M_ITEM              = 80;
+static const uintptr_t OFF_M_ITEMDEFINDEX      = 442;
+static const uintptr_t OFF_M_ITEMID            = 456;
+static const uintptr_t OFF_M_ITEMIDHIGH        = 464;
+static const uintptr_t OFF_M_ITEMIDLOW         = 468;
+static const uintptr_t OFF_M_ACCOUNTID         = 472;
+static const uintptr_t OFF_M_BDISALLOWSOC      = 489;
+static const uintptr_t OFF_M_BINITIALIZED      = 488;
+static const uintptr_t OFF_M_BRESTORECUSTOM    = 440;
+static const uintptr_t OFF_M_OWNERXUIDLOW      = 5752;
+static const uintptr_t OFF_M_OWNERXUIDHIGH     = 5756;
+static const uintptr_t OFF_M_FALLBACKPAINTKIT  = 5760;
+static const uintptr_t OFF_M_FALLBACKSEED      = 5764;
+static const uintptr_t OFF_M_FALLBACKWEAR      = 5768;
+static const uintptr_t OFF_M_FALLBACKSTATTRAK  = 5772;
+static const uintptr_t OFF_M_PGAMESCENENODE    = 816;
+static const uintptr_t OFF_M_MODELSTATE        = 320;
+static const uintptr_t OFF_M_MESHGROUPMASK     = 520;
+static const uintptr_t OFF_M_HHUDMODELARMS     = 7044;
+
+// ---- tiny string/format helpers (no CRT) --------------------------------
+
+static void copy_str(char* dst, const char* src, int cap) {
+    int i = 0;
+    while (src[i] && i < cap - 1) { dst[i] = src[i]; i++; }
+    dst[i] = 0;
+}
+
+static void build_path(char* out, int cap, const char* dir, const char* file) {
+    int i = 0;
+    while (dir[i] && i < cap - 1) { out[i] = dir[i]; i++; }
+    if (i < cap - 1) out[i++] = '\\';
+    int j = 0;
+    while (file[j] && i < cap - 1) { out[i++] = file[j++]; }
+    out[i] = 0;
+}
+
+static char lower_c(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
+
+// Writes the decimal representation of v into out, returns digit count.
+static int u32toa(char* out, uint32_t v) {
+    char tmp[12];
+    int n = 0;
+    do { tmp[n++] = (char)('0' + (v % 10)); v /= 10; } while (v);
+    for (int i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
+    return n;
+}
+
+static void log_append(char** p, const char* s) {
+    while (*s) { *(*p)++ = *s++; }
+}
+
+static void log_u32(char** p, uint32_t v) {
+    char tmp[16];
+    int n = 0;
+    do { tmp[n++] = (char)('0' + (v % 10)); v /= 10; } while (v);
+    while (n--) *(*p)++ = tmp[n];
+}
+
+static void log_u32_pad(char** p, uint32_t v, int width) {
+    char tmp[16];
+    int n = 0;
+    do { tmp[n++] = (char)('0' + (v % 10)); v /= 10; } while (v);
+    while (n < width) tmp[n++] = '0';
+    while (n--) *(*p)++ = tmp[n];
+}
+
+static void log_i32(char** p, int32_t v) {
+    if (v < 0) { *(*p)++ = '-'; log_u32(p, (uint32_t)(-(int64_t)v)); }
+    else log_u32(p, (uint32_t)v);
+}
+
+static void log_hex64(char** p, uint64_t v) {
+    char tmp[16];
+    int n = 0;
+    do {
+        int d = (int)(v & 0xF);
+        tmp[n++] = (char)(d < 10 ? '0' + d : 'a' + d - 10);
+        v >>= 4;
+    } while (v);
+    while (n--) *(*p)++ = tmp[n];
+}
+
+static void log_float3(char** p, float f) {
+    int whole = (int)f;
+    int frac = (int)((f - (float)whole) * 1000.0f + 0.5f);
+    if (frac < 0) frac = 0;
+    if (frac >= 1000) { whole += 1; frac = 0; }
+    log_i32(p, (int32_t)whole);
+    *(*p)++ = '.';
+    char tmp[3];
+    tmp[2] = (char)('0' + (frac % 10)); frac /= 10;
+    tmp[1] = (char)('0' + (frac % 10)); frac /= 10;
+    tmp[0] = (char)('0' + (frac % 10));
+    *(*p)++ = tmp[0]; *(*p)++ = tmp[1]; *(*p)++ = tmp[2];
+}
 
 static char g_configPath[MAX_PATH] = { 0 };
 static char g_logPath[MAX_PATH] = { 0 };
 
 static void ResolveUserPaths() {
     if (g_configPath[0]) return;  // already resolved
-    char up[MAX_PATH] = { 0 };
+    char up[MAX_PATH];
+    up[0] = 0;
     DWORD n = GetEnvironmentVariableA("USERPROFILE", up, MAX_PATH);
-    if (!n || n >= MAX_PATH) strcpy_s(up, "C:\\Users\\Public");
-    snprintf(g_configPath, MAX_PATH, "%s\\cs2py_skin.txt", up);
-    snprintf(g_logPath, MAX_PATH, "%s\\cs2py_dll.log", up);
+    if (!n || n >= MAX_PATH) copy_str(up, "C:\\Users\\Public", MAX_PATH);
+    build_path(g_configPath, MAX_PATH, up, "cs2py_skin.txt");
+    build_path(g_logPath, MAX_PATH, up, "cs2py_dll.log");
 }
 
 static void DllLog(const char* fmt, ...) {
-    ResolveUserPaths();
-    FILE* f = nullptr;
-    if (fopen_s(&f, g_logPath, "a") != 0 || !f) return;
+    char line[1024];
+    char* p = line;
     SYSTEMTIME st;
     GetLocalTime(&st);
-    fprintf(f, "%02d:%02d:%02d.%03d ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    log_u32_pad(&p, st.wHour, 2); *p++ = ':';
+    log_u32_pad(&p, st.wMinute, 2); *p++ = ':';
+    log_u32_pad(&p, st.wSecond, 2); *p++ = '.';
+    log_u32_pad(&p, st.wMilliseconds, 3); *p++ = ' ';
+
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
+    while (*fmt) {
+        if (*fmt != '%') { *p++ = *fmt++; continue; }
+        fmt++;
+        if (*fmt == 's') { const char* s = va_arg(ap, const char*); log_append(&p, s ? s : "(null)"); }
+        else if (*fmt == 'p') { log_hex64(&p, (uint64_t)(uintptr_t)va_arg(ap, void*)); }
+        else if (*fmt == 'u') { log_u32(&p, (uint32_t)va_arg(ap, unsigned int)); }
+        else if (*fmt == 'd') { log_i32(&p, (int32_t)va_arg(ap, int)); }
+        else if (*fmt == '.' && fmt[1] == '3' && fmt[2] == 'f') { fmt += 2; log_float3(&p, (float)va_arg(ap, double)); }
+        fmt++;
+    }
     va_end(ap);
-    fprintf(f, "\n");
-    fclose(f);
+    *p++ = '\n';
+    *p = 0;
+
+    ResolveUserPaths();
+    HANDLE f = CreateFileA(g_logPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        WriteFile(f, line, (DWORD)(p - line), &written, NULL);
+        CloseHandle(f);
+    }
 }
 
-struct SkinCfg { int paint = 0; int seed = 0; float wear = 0.0f; int meshMask = 1; std::string model; };
-static std::vector<std::pair<uint16_t, SkinCfg>> g_skins;
-static std::mutex g_mtx;
+// ---- config storage (no STL) -------------------------------------------
 
-using SetAttrFn = void(__fastcall*)(void*, const char*, float);
-using UpdateSkinFn = void(__fastcall*)(void*, bool);
-using UpdateCompFn = void(__fastcall*)(void*, bool);
-using UpdateCompSetFn = void(__fastcall*)(void*, bool);
-using SetMaskFn = void(__fastcall*)(void*, uint64_t);
-using SetModelFn = void(__fastcall*)(void*, const char*);
-using UpdateSubclassFn = void(__fastcall*)(void*);
-using UpdateWeaponVmFn = void(__fastcall*)(void*);
-static SetAttrFn g_setAttr = nullptr;
-static UpdateSkinFn g_updateSkin = nullptr;
-static UpdateCompFn g_updateComp = nullptr;
-static UpdateCompSetFn g_updateCompSet = nullptr;
-static SetMaskFn g_setMask = nullptr;
-static SetModelFn g_setModel = nullptr;
-static UpdateSubclassFn g_updateSubclass = nullptr;
-static UpdateWeaponVmFn g_updateWeaponVm = nullptr;
+typedef struct SkinCfg {
+    int paint;
+    int seed;
+    float wear;
+    int meshMask;
+    char model[320];
+} SkinCfg;
+
+typedef struct SkinEntry {
+    uint16_t def;
+    SkinCfg cfg;
+} SkinEntry;
+
+static SkinEntry g_skins[64];
+static int g_skin_count = 0;
+static SRWLOCK g_lock = SRWLOCK_INIT;
+static char g_filebuf[65536];
+
+// ---- function pointers --------------------------------------------------
+
+typedef void(__fastcall* SetAttrFn)(void*, const char*, float);
+typedef void(__fastcall* UpdateSkinFn)(void*, bool);
+typedef void(__fastcall* UpdateCompFn)(void*, bool);
+typedef void(__fastcall* UpdateCompSetFn)(void*, bool);
+typedef void(__fastcall* SetMaskFn)(void*, uint64_t);
+typedef void(__fastcall* SetModelFn)(void*, const char*);
+typedef void(__fastcall* UpdateSubclassFn)(void*);
+typedef void(__fastcall* UpdateWeaponVmFn)(void*);
+
+static SetAttrFn g_setAttr = 0;
+static UpdateSkinFn g_updateSkin = 0;
+static UpdateCompFn g_updateComp = 0;
+static UpdateCompSetFn g_updateCompSet = 0;
+static SetMaskFn g_setMask = 0;
+static SetModelFn g_setModel = 0;
+static UpdateSubclassFn g_updateSubclass = 0;
+static UpdateWeaponVmFn g_updateWeaponVm = 0;
+
+// ---- pattern scanning ---------------------------------------------------
+
+static int hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return 0;
+}
 
 static uintptr_t PatternScan(const char* module, const char* pattern) {
     HMODULE mod = GetModuleHandleA(module);
     if (!mod) return 0;
-    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(mod);
-    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(reinterpret_cast<uint8_t*>(mod) + dos->e_lfanew);
-    uint8_t* base = reinterpret_cast<uint8_t*>(mod);
-    size_t size = nt->OptionalHeader.SizeOfImage;
-    std::vector<uint8_t> pat;
-    std::vector<bool> mask;
-    std::istringstream ss(pattern);
-    std::string tok;
-    while (ss >> tok) {
-        if (tok == "?") { pat.push_back(0); mask.push_back(false); }
-        else { pat.push_back(static_cast<uint8_t>(strtoul(tok.c_str(), nullptr, 16))); mask.push_back(true); }
-    }
-    for (size_t i = 0; i + pat.size() <= size; ++i) {
-        bool ok = true;
-        for (size_t j = 0; j < pat.size(); ++j) {
-            if (mask[j] && base[i + j] != pat[j]) { ok = false; break; }
+    uint8_t* base = (uint8_t*)mod;
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)mod;
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+    uintptr_t size = nt->OptionalHeader.SizeOfImage;
+
+    uint8_t pat[64];
+    uint8_t mask[64];
+    int n = 0;
+    const char* p = pattern;
+    while (*p) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        if (p[0] == '?' && (p[1] == 0 || p[1] == ' ')) {
+            pat[n] = 0; mask[n] = 0; n++;
+            p++;
+        } else {
+            pat[n] = (uint8_t)((hexval(p[0]) << 4) | hexval(p[1]));
+            mask[n] = 1; n++;
+            p += 2;
         }
-        if (ok) return reinterpret_cast<uintptr_t>(base + i);
+        if (n >= 63) break;
+    }
+    if (n == 0) return 0;
+
+    for (uintptr_t i = 0; i + n <= size; i++) {
+        int ok = 1;
+        for (int j = 0; j < n; j++) {
+            if (mask[j] && base[i + j] != pat[j]) { ok = 0; break; }
+        }
+        if (ok) return (uintptr_t)(base + i);
     }
     return 0;
 }
@@ -118,7 +284,7 @@ static uintptr_t PatternScan(const char* module, const char* pattern) {
 static uintptr_t ScanCall(const char* pattern) {
     uintptr_t call = PatternScan("client.dll", pattern);
     if (!call) return 0;
-    int32_t rel = *reinterpret_cast<int32_t*>(call + 1);
+    int32_t rel = *(int32_t*)(call + 1);
     return call + 5 + rel;
 }
 
@@ -127,101 +293,184 @@ static void ResolveFunctions() {
     // SetAttributeValueByName: CALL instruction; resolve rel32.
     uintptr_t call = PatternScan("client.dll", "E8 ? ? ? ? 66 41 0F 6E D4");
     if (call) {
-        int32_t rel = *reinterpret_cast<int32_t*>(call + 1);
-        g_setAttr = reinterpret_cast<SetAttrFn>(call + 5 + rel);
+        int32_t rel = *(int32_t*)(call + 1);
+        g_setAttr = (SetAttrFn)(call + 5 + rel);
     }
     // C_CSWeaponBase::UpdateSkin: function prologue.
-    g_updateSkin = reinterpret_cast<UpdateSkinFn>(PatternScan("client.dll",
-        "48 89 5C 24 08 57 48 83 EC 20 8B DA 48 8B F9 E8 ? ? ? ? F6 C3 01 74 0A"));
+    g_updateSkin = (UpdateSkinFn)PatternScan("client.dll",
+        "48 89 5C 24 08 57 48 83 EC 20 8B DA 48 8B F9 E8 ? ? ? ? F6 C3 01 74 0A");
     // UpdateCompositeMaterial: prefer the CALL pattern, then the direct prologue.
-    g_updateComp = reinterpret_cast<UpdateCompFn>(ScanCall("E8 ? ? ? ? 48 8D 8B ? ? ? ? 48 89 BC 24"));
+    g_updateComp = (UpdateCompFn)ScanCall("E8 ? ? ? ? 48 8D 8B ? ? ? ? 48 89 BC 24");
     if (!g_updateComp)
-        g_updateComp = reinterpret_cast<UpdateCompFn>(PatternScan("client.dll",
-            "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 57 41 56 41 57 48 83 EC 20 44 0F B6 F2"));
+        g_updateComp = (UpdateCompFn)PatternScan("client.dll",
+            "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 57 41 56 41 57 48 83 EC 20 44 0F B6 F2");
     // UpdateCompositeMaterialSet.
-    g_updateCompSet = reinterpret_cast<UpdateCompSetFn>(PatternScan("client.dll",
-        "40 55 53 41 57 48 8D AC 24 00 FE ? ?"));
+    g_updateCompSet = (UpdateCompSetFn)PatternScan("client.dll",
+        "40 55 53 41 57 48 8D AC 24 00 FE ? ?");
     // SetMeshGroupMask (game function; does the mesh refresh we need).
-    g_setMask = reinterpret_cast<SetMaskFn>(PatternScan("client.dll",
-        "48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC ? 48 8D 99 ? ? ? ? 48 8B 71"));
+    g_setMask = (SetMaskFn)PatternScan("client.dll",
+        "48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC ? 48 8D 99 ? ? ? ? 48 8B 71");
     // SetModel (for the knife model swap).
-    g_setModel = reinterpret_cast<SetModelFn>(PatternScan("client.dll",
-        "40 53 48 83 EC ? 48 8B D9 4C 8B C2 48 8B 0D ? ? ? ? 48 8D 54 24 40"));
+    g_setModel = (SetModelFn)PatternScan("client.dll",
+        "40 53 48 83 EC ? 48 8B D9 4C 8B C2 48 8B 0D ? ? ? ? 48 8D 54 24 40");
     // UpdateSubclass + UpdateWeaponViewModel (knife animation class).
-    g_updateSubclass = reinterpret_cast<UpdateSubclassFn>(PatternScan("client.dll",
-        "4C 8B DC 53 48 81 EC ? ? ? ? 48 8B 41"));
-    g_updateWeaponVm = reinterpret_cast<UpdateWeaponVmFn>(PatternScan("client.dll",
-        "40 53 48 83 EC 20 48 8B D9 E8 ? ? ? ? 48 83 BB 88 03 00 00 00"));
+    g_updateSubclass = (UpdateSubclassFn)PatternScan("client.dll",
+        "4C 8B DC 53 48 81 EC ? ? ? ? 48 8B 41");
+    g_updateWeaponVm = (UpdateWeaponVmFn)PatternScan("client.dll",
+        "40 53 48 83 EC 20 48 8B D9 E8 ? ? ? ? 48 83 BB 88 03 00 00 00");
 
     DllLog("resolve: setAttr=%p updateSkin=%p updateComp=%p updateCompSet=%p setMask=%p setModel=%p updateSubclass=%p updateWeaponVm=%p",
         (void*)g_setAttr, (void*)g_updateSkin, (void*)g_updateComp, (void*)g_updateCompSet,
         (void*)g_setMask, (void*)g_setModel, (void*)g_updateSubclass, (void*)g_updateWeaponVm);
 }
 
-static void ReadConfig() {
-    std::lock_guard<std::mutex> lock(g_mtx);
-    g_skins.clear();
-    ResolveUserPaths();
-    std::ifstream f(g_configPath);
-    if (!f) return;
-    int def = 0, paint = 0, seed = 0, mesh = 1;
-    float wear = 0.0f;
-    std::string model;
-    while (f >> def >> paint >> seed >> wear >> mesh >> model) {
-        if (model == "-") model.clear();
-        g_skins.push_back({ static_cast<uint16_t>(def), { paint, seed, wear, mesh, model } });
-    }
+// ---- config parsing (no iostream) --------------------------------------
+
+static int is_space(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+
+static void skip_ws(const char** s, const char* end) {
+    while (*s < end && is_space(**s)) (*s)++;
 }
+
+static int parse_i32(const char** s, const char* end, int* out) {
+    skip_ws(s, end);
+    if (*s >= end) return 0;
+    int sign = 1;
+    if (**s == '-') { sign = -1; (*s)++; }
+    if (*s >= end || **s < '0' || **s > '9') return 0;
+    long v = 0;
+    while (*s < end && **s >= '0' && **s <= '9') {
+        v = v * 10 + (**s - '0');
+        (*s)++;
+        if (v > 0x7FFFFFFF) v = 0x7FFFFFFF;
+    }
+    *out = (int)(sign * v);
+    return 1;
+}
+
+static int parse_float(const char** s, const char* end, float* out) {
+    skip_ws(s, end);
+    if (*s >= end) return 0;
+    int sign = 1;
+    if (**s == '-') { sign = -1; (*s)++; }
+    if (*s >= end || (**s < '0' || **s > '9')) return 0;
+    double whole = 0.0;
+    while (*s < end && **s >= '0' && **s <= '9') { whole = whole * 10.0 + (**s - '0'); (*s)++; }
+    double frac = 0.0;
+    if (*s < end && **s == '.') {
+        (*s)++;
+        double place = 0.1;
+        while (*s < end && **s >= '0' && **s <= '9') {
+            frac += (**s - '0') * place;
+            place *= 0.1;
+            (*s)++;
+        }
+    }
+    *out = (float)(sign * (whole + frac));
+    return 1;
+}
+
+static void parse_token(const char** s, const char* end, char* out, int cap) {
+    skip_ws(s, end);
+    int i = 0;
+    while (*s < end && !is_space(**s) && i < cap - 1) { out[i++] = **s; (*s)++; }
+    out[i] = 0;
+}
+
+static void ReadConfig() {
+    ResolveUserPaths();
+    HANDLE f = CreateFileA(g_configPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD size = GetFileSize(f, NULL);
+    if (size == 0 || size >= sizeof(g_filebuf)) { CloseHandle(f); return; }
+    DWORD rd = 0;
+    if (!ReadFile(f, g_filebuf, size, &rd, NULL)) { CloseHandle(f); return; }
+    CloseHandle(f);
+
+    AcquireSRWLockExclusive(&g_lock);
+    g_skin_count = 0;
+    const char* s = g_filebuf;
+    const char* end = g_filebuf + rd;
+    while (s < end) {
+        int def = 0, paint = 0, seed = 0, mesh = 1;
+        float wear = 0.0f;
+        char model[320];
+        model[0] = 0;
+        if (!parse_i32(&s, end, &def)) break;
+        if (!parse_i32(&s, end, &paint)) break;
+        if (!parse_i32(&s, end, &seed)) break;
+        if (!parse_float(&s, end, &wear)) break;
+        if (!parse_i32(&s, end, &mesh)) break;
+        parse_token(&s, end, model, sizeof(model));
+        if (model[0] == '-' && model[1] == 0) model[0] = 0;
+        if (g_skin_count < 64) {
+            g_skins[g_skin_count].def = (uint16_t)def;
+            g_skins[g_skin_count].cfg.paint = paint;
+            g_skins[g_skin_count].cfg.seed = seed;
+            g_skins[g_skin_count].cfg.wear = wear;
+            g_skins[g_skin_count].cfg.meshMask = mesh;
+            copy_str(g_skins[g_skin_count].cfg.model, model, (int)sizeof(model));
+            g_skin_count++;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+}
+
+// ---- entity resolution --------------------------------------------------
 
 static uintptr_t ResolveEntity(uintptr_t client, uint32_t handle) {
     if (!handle || handle == 0xFFFFFFFFu) return 0;
-    uintptr_t entityList = *reinterpret_cast<uintptr_t*>(client + OFF_DW_ENTITY_LIST);
-    uintptr_t listEntry = *reinterpret_cast<uintptr_t*>(entityList + 0x8 * ((handle & 0x7FFF) >> 9) + 0x10);
+    uintptr_t entityList = *(uintptr_t*)(client + OFF_DW_ENTITY_LIST);
+    if (!entityList) return 0;
+    uintptr_t listEntry = *(uintptr_t*)(entityList + 0x8 * ((handle & 0x7FFF) >> 9) + 0x10);
     if (!listEntry) return 0;
-    return *reinterpret_cast<uintptr_t*>(listEntry + 0x70 * (handle & 0x1FF));
+    return *(uintptr_t*)(listEntry + 0x70 * (handle & 0x1FF));
 }
 
-static void ApplySkin(uintptr_t weapon, const SkinCfg& cfg, uint16_t defIndex) {
+// ---- skin application ---------------------------------------------------
+
+static void ApplySkin(uintptr_t weapon, const SkinCfg* cfg, uint16_t defIndex) {
     uintptr_t itemView = weapon + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM;
-    uint32_t accountId = *reinterpret_cast<uint32_t*>(weapon + OFF_M_OWNERXUIDLOW);
+    uint32_t accountId = *(uint32_t*)(weapon + OFF_M_OWNERXUIDLOW);
     if (!accountId) accountId = 1;
 
-    *reinterpret_cast<uint8_t*>(itemView + OFF_M_BDISALLOWSOC) = 1;
-    *reinterpret_cast<uint8_t*>(itemView + OFF_M_BRESTORECUSTOM) = 1;
-    *reinterpret_cast<uint8_t*>(itemView + OFF_M_BINITIALIZED) = 1;
-    *reinterpret_cast<uint32_t*>(itemView + OFF_M_ACCOUNTID) = accountId;
-    *reinterpret_cast<uint16_t*>(itemView + OFF_M_ITEMDEFINDEX) = defIndex;
-    *reinterpret_cast<uint32_t*>(itemView + OFF_M_ITEMIDHIGH) = 0xFFFFFFFFu;
-    *reinterpret_cast<uint32_t*>(itemView + OFF_M_ITEMIDLOW) = 0;
-    *reinterpret_cast<uint64_t*>(itemView + OFF_M_ITEMID) = 0xFFFFFFFF00000000ull;
+    *(uint8_t*)(itemView + OFF_M_BDISALLOWSOC) = 1;
+    *(uint8_t*)(itemView + OFF_M_BRESTORECUSTOM) = 1;
+    *(uint8_t*)(itemView + OFF_M_BINITIALIZED) = 1;
+    *(uint32_t*)(itemView + OFF_M_ACCOUNTID) = accountId;
+    *(uint16_t*)(itemView + OFF_M_ITEMDEFINDEX) = defIndex;
+    *(uint32_t*)(itemView + OFF_M_ITEMIDHIGH) = 0xFFFFFFFFu;
+    *(uint32_t*)(itemView + OFF_M_ITEMIDLOW) = 0;
+    *(uint64_t*)(itemView + OFF_M_ITEMID) = 0xFFFFFFFF00000000ull;
 
-    *reinterpret_cast<uint32_t*>(weapon + OFF_M_OWNERXUIDLOW) = accountId;
-    *reinterpret_cast<uint32_t*>(weapon + OFF_M_OWNERXUIDHIGH) = 0;
-    *reinterpret_cast<int32_t*>(weapon + OFF_M_FALLBACKPAINTKIT) = cfg.paint;
-    *reinterpret_cast<int32_t*>(weapon + OFF_M_FALLBACKSEED) = cfg.seed;
-    *reinterpret_cast<float*>(weapon + OFF_M_FALLBACKWEAR) = cfg.wear;
-    *reinterpret_cast<int32_t*>(weapon + OFF_M_FALLBACKSTATTRAK) = -1;
+    *(uint32_t*)(weapon + OFF_M_OWNERXUIDLOW) = accountId;
+    *(uint32_t*)(weapon + OFF_M_OWNERXUIDHIGH) = 0;
+    *(int32_t*)(weapon + OFF_M_FALLBACKPAINTKIT) = cfg->paint;
+    *(int32_t*)(weapon + OFF_M_FALLBACKSEED) = cfg->seed;
+    *(float*)(weapon + OFF_M_FALLBACKWEAR) = cfg->wear;
+    *(int32_t*)(weapon + OFF_M_FALLBACKSTATTRAK) = -1;
 
     // Mesh group mask via the game's own setter (does the mesh refresh).
     if (g_setMask) {
-        uintptr_t wSceneNode = *reinterpret_cast<uintptr_t*>(weapon + OFF_M_PGAMESCENENODE);
-        if (wSceneNode) g_setMask(reinterpret_cast<void*>(wSceneNode), static_cast<uint64_t>(cfg.meshMask));
+        uintptr_t wSceneNode = *(uintptr_t*)(weapon + OFF_M_PGAMESCENENODE);
+        if (wSceneNode) g_setMask((void*)wSceneNode, (uint64_t)cfg->meshMask);
     }
 
     if (g_setAttr) {
-        g_setAttr(reinterpret_cast<void*>(itemView), "set item texture prefab", static_cast<float>(cfg.paint));
-        g_setAttr(reinterpret_cast<void*>(itemView), "set item texture wear", cfg.wear);
-        g_setAttr(reinterpret_cast<void*>(itemView), "set item texture seed", static_cast<float>(cfg.seed));
+        g_setAttr((void*)itemView, "set item texture prefab", (float)cfg->paint);
+        g_setAttr((void*)itemView, "set item texture wear", cfg->wear);
+        g_setAttr((void*)itemView, "set item texture seed", (float)cfg->seed);
     }
     if (g_updateSkin) {
-        g_updateSkin(reinterpret_cast<void*>(weapon), true);
+        g_updateSkin((void*)weapon, true);
     }
     // Composite material update re-applies the texture on the viewmodel.
     if (g_updateComp) {
-        g_updateComp(reinterpret_cast<void*>(weapon + 0x608), true);
+        g_updateComp((void*)(weapon + 0x608), true);
     }
     if (g_updateCompSet) {
-        g_updateCompSet(reinterpret_cast<void*>(weapon), false);
+        g_updateCompSet((void*)weapon, false);
     }
 }
 
@@ -229,120 +478,154 @@ static void ApplyViewmodelMask(uintptr_t client, uintptr_t pawn, int meshMask) {
     // The first-person viewmodel (hud arms + weapon) is what the user sees.
     // Its scene node children carry the mesh group masks; set them so only the
     // painted group renders (legacy=2, normal=1) instead of all groups.
-    uint32_t armsHandle = *reinterpret_cast<uint32_t*>(pawn + OFF_M_HHUDMODELARMS);
+    uint32_t armsHandle = *(uint32_t*)(pawn + OFF_M_HHUDMODELARMS);
     uintptr_t arms = ResolveEntity(client, armsHandle);
     if (!arms) return;
-    uintptr_t sceneNode = *reinterpret_cast<uintptr_t*>(arms + OFF_M_PGAMESCENENODE);
+    uintptr_t sceneNode = *(uintptr_t*)(arms + OFF_M_PGAMESCENENODE);
     if (!sceneNode) return;
-    uintptr_t child = *reinterpret_cast<uintptr_t*>(sceneNode + 64);  // m_pChild
+    uintptr_t child = *(uintptr_t*)(sceneNode + 64);  // m_pChild
     int guard = 0;
     while (child && guard++ < 16) {
         if (g_setMask)
-            g_setMask(reinterpret_cast<void*>(child), static_cast<uint64_t>(meshMask));
+            g_setMask((void*)child, (uint64_t)meshMask);
         else
-            *reinterpret_cast<uint64_t*>(child + OFF_M_MODELSTATE + OFF_M_MESHGROUPMASK) = static_cast<uint64_t>(meshMask);
-        child = *reinterpret_cast<uintptr_t*>(child + 72);  // m_pNextSibling
+            *(uint64_t*)(child + OFF_M_MODELSTATE + OFF_M_MESHGROUPMASK) = (uint64_t)meshMask;
+        child = *(uintptr_t*)(child + 72);  // m_pNextSibling
     }
 }
 
 static uint32_t MakeSubclassToken(uint16_t defIndex) {
     // Murmur2 lowercase of the decimal def index (matches CS2's subclass id).
     char buf[8];
-    int n = snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(defIndex));
-    if (n <= 0 || n >= static_cast<int>(sizeof(buf))) return 0;
-    const uint32_t m = 0x5bd1e995;
+    int n = u32toa(buf, (uint32_t)defIndex);
+    if (n <= 0 || n >= 8) return 0;
+    const uint32_t m = 0x5bd1e995u;
     const uint32_t r = 24;
-    uint32_t h = 0x31415926u ^ static_cast<uint32_t>(n);
+    uint32_t h = 0x31415926u ^ (uint32_t)n;
     int i = 0;
-    auto lower = [](char c) { return (c >= 'A' && c <= 'Z') ? char(c + 32) : c; };
     while (n >= 4) {
-        uint32_t k = static_cast<uint32_t>(static_cast<unsigned char>(lower(buf[i]))) |
-            (static_cast<uint32_t>(static_cast<unsigned char>(lower(buf[i + 1]))) << 8) |
-            (static_cast<uint32_t>(static_cast<unsigned char>(lower(buf[i + 2]))) << 16) |
-            (static_cast<uint32_t>(static_cast<unsigned char>(lower(buf[i + 3]))) << 24);
+        uint32_t k = (uint32_t)(uint8_t)lower_c(buf[i]) |
+            ((uint32_t)(uint8_t)lower_c(buf[i + 1]) << 8) |
+            ((uint32_t)(uint8_t)lower_c(buf[i + 2]) << 16) |
+            ((uint32_t)(uint8_t)lower_c(buf[i + 3]) << 24);
         k *= m; k ^= k >> r; k *= m;
         h *= m; h ^= k;
         i += 4; n -= 4;
     }
     switch (n) {
-    case 3: h ^= static_cast<uint32_t>(static_cast<unsigned char>(lower(buf[i + 2]))) << 16; [[fallthrough]];
-    case 2: h ^= static_cast<uint32_t>(static_cast<unsigned char>(lower(buf[i + 1]))) << 8; [[fallthrough]];
-    case 1: h ^= static_cast<unsigned char>(lower(buf[i])); h *= m;
+    case 3:
+        h ^= (uint32_t)(uint8_t)lower_c(buf[i + 2]) << 16;
+        h ^= (uint32_t)(uint8_t)lower_c(buf[i + 1]) << 8;
+        h ^= (uint8_t)lower_c(buf[i]);
+        h *= m;
+        break;
+    case 2:
+        h ^= (uint32_t)(uint8_t)lower_c(buf[i + 1]) << 8;
+        h ^= (uint8_t)lower_c(buf[i]);
+        h *= m;
+        break;
+    case 1:
+        h ^= (uint8_t)lower_c(buf[i]);
+        h *= m;
+        break;
     }
     h ^= h >> 13; h *= m; h ^= h >> 15;
     return h;
 }
 
+// ---- main loop ----------------------------------------------------------
+
 static void Loop() {
-    uintptr_t client = reinterpret_cast<uintptr_t>(GetModuleHandleA("client.dll"));
+    uintptr_t client = (uintptr_t)GetModuleHandleA("client.dll");
     if (!client) {
         DllLog("loop: client.dll not found, aborting");
         return;
     }
     DllLog("loop: client.dll base=%p", (void*)client);
     ResolveFunctions();
-    DllLog("loop: entering main loop, skins=%d", (int)g_skins.size());
+    DllLog("loop: entering main loop, skins=%d", g_skin_count);
+
+    static uint16_t s_lastDef = 0xFFFF;
+    static int s_lastPaint = -1;
+    static int s_lastKnife = -1;
+
     while (true) {
         ReadConfig();
-        uintptr_t pawn = *reinterpret_cast<uintptr_t*>(client + OFF_DW_LOCAL_PLAYER_PAWN);
+        uintptr_t pawn = *(uintptr_t*)(client + OFF_DW_LOCAL_PLAYER_PAWN);
         if (!pawn) {
             Sleep(250);
             continue;
         }
-        uintptr_t ws = *reinterpret_cast<uintptr_t*>(pawn + OFF_M_PWEAPONSERVICES);
+        uintptr_t ws = *(uintptr_t*)(pawn + OFF_M_PWEAPONSERVICES);
         if (!ws) {
             Sleep(100);
             continue;
         }
-        uint32_t handle = *reinterpret_cast<uint32_t*>(ws + OFF_M_HACTIVEWEAPON);
+        uint32_t handle = *(uint32_t*)(ws + OFF_M_HACTIVEWEAPON);
         uintptr_t weapon = ResolveEntity(client, handle);
         if (!weapon) {
             Sleep(100);
             continue;
         }
         uintptr_t itemView = weapon + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM;
-        uint16_t def = *reinterpret_cast<uint16_t*>(itemView + OFF_M_ITEMDEFINDEX);
-        const bool isKnife = (def == 42 || def == 59 || (def >= 500 && def <= 526));
-        std::lock_guard<std::mutex> lock(g_mtx);
-        bool applied = false;
+        uint16_t def = *(uint16_t*)(itemView + OFF_M_ITEMDEFINDEX);
+        const int isKnife = (def == 42 || def == 59 || (def >= 500 && def <= 526));
+
+        AcquireSRWLockShared(&g_lock);
+        int applied = 0;
+        int appliedPaint = -1;
         if (isKnife) {
             // Knives: apply the most recently configured knife (last knife entry
             // in the file), model-swapping as needed. This lets the GUI switch
             // the held knife's model/skin immediately.
-            const SkinCfg* pick = nullptr;
+            const SkinCfg* pick = 0;
             uint16_t pickDef = 0;
-            for (const auto& [d, cfg] : g_skins) {
-                if (d >= 500 && d <= 526) { pick = &cfg; pickDef = d; }
+            for (int i = 0; i < g_skin_count; i++) {
+                if (g_skins[i].def >= 500 && g_skins[i].def <= 526) {
+                    pick = &g_skins[i].cfg;
+                    pickDef = g_skins[i].def;
+                }
             }
             if (pick) {
-                DllLog("apply: def=%u paint=%d seed=%d wear=%.3f mesh=%d model=%s weapon=%p",
-                    (unsigned)def, pick->paint, pick->seed, pick->wear, pick->meshMask, pick->model.c_str(), (void*)weapon);
-                ApplySkin(weapon, *pick, pickDef);
+                if (!(def == s_lastDef && pick->paint == s_lastPaint && 1 == s_lastKnife))
+                    DllLog("apply: def=%u paint=%d seed=%d wear=%.3f mesh=%d model=%s weapon=%p",
+                        (unsigned)def, pick->paint, pick->seed, pick->wear, pick->meshMask, pick->model, (void*)weapon);
+                ApplySkin(weapon, pick, pickDef);
                 ApplyViewmodelMask(client, pawn, pick->meshMask);
-                if (!pick->model.empty() && g_setModel) {
-                    g_setModel(reinterpret_cast<void*>(weapon), pick->model.c_str());
+                if (pick->model[0] && g_setModel) {
+                    g_setModel((void*)weapon, pick->model);
                     // Subclass id + refresh drives the knife's animation class
                     // (e.g. butterfly flip instead of default knife slash).
-                    *reinterpret_cast<uint32_t*>(weapon + 896) = MakeSubclassToken(pickDef);  // m_nSubclassID
-                    if (g_updateSubclass) g_updateSubclass(reinterpret_cast<void*>(weapon));
-                    if (g_updateWeaponVm) g_updateWeaponVm(reinterpret_cast<void*>(weapon));
+                    *(uint32_t*)(weapon + 896) = MakeSubclassToken(pickDef);  // m_nSubclassID
+                    if (g_updateSubclass) g_updateSubclass((void*)weapon);
+                    if (g_updateWeaponVm) g_updateWeaponVm((void*)weapon);
                 }
-                applied = true;
+                applied = 1;
+                appliedPaint = pick->paint;
             }
         } else {
-            for (const auto& [d, cfg] : g_skins) {
-                if (d != def) continue;
-                DllLog("apply: def=%u paint=%d seed=%d wear=%.3f mesh=%d model=%s weapon=%p",
-                    (unsigned)def, cfg.paint, cfg.seed, cfg.wear, cfg.meshMask, cfg.model.c_str(), (void*)weapon);
+            for (int i = 0; i < g_skin_count; i++) {
+                if (g_skins[i].def != def) continue;
+                const SkinCfg* cfg = &g_skins[i].cfg;
+                if (!(def == s_lastDef && cfg->paint == s_lastPaint && 0 == s_lastKnife))
+                    DllLog("apply: def=%u paint=%d seed=%d wear=%.3f mesh=%d model=%s weapon=%p",
+                        (unsigned)def, cfg->paint, cfg->seed, cfg->wear, cfg->meshMask, cfg->model, (void*)weapon);
                 ApplySkin(weapon, cfg, def);
-                ApplyViewmodelMask(client, pawn, cfg.meshMask);
-                applied = true;
+                ApplyViewmodelMask(client, pawn, cfg->meshMask);
+                applied = 1;
+                appliedPaint = cfg->paint;
                 break;
             }
         }
         if (!applied) {
-            DllLog("nomatch: def=%u isKnife=%d skins=%d", (unsigned)def, (int)isKnife, (int)g_skins.size());
+            if (!(def == s_lastDef && -1 == s_lastPaint && isKnife == s_lastKnife))
+                DllLog("nomatch: def=%u isKnife=%d skins=%d", (unsigned)def, isKnife, g_skin_count);
+            appliedPaint = -1;
         }
+        s_lastDef = def;
+        s_lastPaint = appliedPaint;
+        s_lastKnife = isKnife;
+        ReleaseSRWLockShared(&g_lock);
         Sleep(100);
     }
 }
@@ -352,16 +635,16 @@ static DWORD WINAPI LoopThread(LPVOID) {
     return 0;
 }
 
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
+extern "C" BOOL WINAPI DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
-        DisableThreadLibraryCalls(hModule);
+        // NOTE: no DisableThreadLibraryCalls here. Under manual mapping the
+        // module is not registered with the loader, and calling that API with
+        // an unregistered base walks a stale loader list and faults. It is also
+        // unnecessary: an unregistered module never receives thread callbacks.
         DllLog("DllMain: attach, module=%p", (void*)hModule);
-        // Do NOT use std::thread here: constructing a CRT thread during
-        // DLL_PROCESS_ATTACH can deadlock on the loader lock (the new thread's
-        // CRT startup re-acquires it while LoadLibraryA still holds it). A raw
-        // CreateThread returns immediately and lets Loop run after DllMain
-        // returns and the lock is released.
-        CreateThread(nullptr, 0, LoopThread, nullptr, 0, nullptr);
+        // Raw CreateThread (not std::thread): the new thread starts only after
+        // DllMain returns, so the loader lock is never re-entered.
+        CreateThread(0, 0, LoopThread, 0, 0, 0);
     } else if (reason == DLL_PROCESS_DETACH) {
         DllLog("DllMain: detach, module=%p", (void*)hModule);
     }
