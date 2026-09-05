@@ -315,6 +315,18 @@ class SkinShareClient:
                     self._latest_payload = payload
                     self._latest_signature = payload_signature
                     self._latest_revision += 1
+                    active = payload.get("active_weapon") if payload else None
+                    if active:
+                        _log(
+                            f"local snapshot sequence={self._latest_revision} "
+                            f"item={active.get('item_key')} "
+                            f"paint_kit={active.get('paint_kit')}"
+                        )
+                    else:
+                        _log(
+                            f"local snapshot sequence={self._latest_revision} "
+                            "active_weapon=none"
+                        )
                     if match_before != (payload or {}).get("match_id"):
                         self._remote_states.clear()
             self._wake.set()
@@ -420,7 +432,7 @@ class SkinShareClient:
             stored["sequence"] = sequence
             stored["received_at"] = time.time()
             self._remote_states[player_id] = stored
-        if not previous:
+        if not previous or sequence != previous_sequence:
             _log(f"received player={player_id} sequence={sequence}")
 
     def _worker(self):
