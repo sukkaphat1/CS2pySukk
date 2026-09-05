@@ -28,11 +28,12 @@ struct RemoteCache {
     uintptr_t pawn, entity, identity;
     RemoteEntry entry;
     RemoteOriginal original;
-    uint64_t lastApply;
+    uint64_t lastApply, settleAt;
     uint64_t lastSeen;
     uintptr_t scene;
     uint32_t hudHandle;
     uintptr_t attachment;
+    uintptr_t hudChild;
 };
 static RemoteEntry g_remote[128];
 static const int REMOTE_CACHE_CAPACITY = 256;
@@ -110,7 +111,7 @@ static int RemoteParse(const char* s, const char* end) {
 }
 static void ReadRemoteConfig() {
     uint64_t tick = GetTickCount64();
-    if (tick - g_remoteReadTick < 500) return;
+    if (tick - g_remoteReadTick < 250) return;
     g_remoteReadTick = tick;
     if (!g_remotePath[0]) {
         char up[MAX_PATH];
@@ -171,8 +172,15 @@ static int RemoteResolve(uintptr_t client, const RemoteEntry* r, uintptr_t* pawn
     return 1;
 }
 static uintptr_t RemoteScene(uintptr_t entity) {
+    if (!remote_readable(entity,OFF_M_PGAMESCENENODE+8)) return 0;
     uintptr_t node = *(uintptr_t*)(entity+OFF_M_PGAMESCENENODE);
     return remote_readable(node,OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK+8) ? node : 0;
+}
+static uintptr_t RemoteHudChild(uintptr_t client, uintptr_t pawn) {
+    uintptr_t arms = ResolveEntity(client,*(uint32_t*)(pawn+OFF_M_HHUDMODELARMS));
+    uintptr_t node = RemoteScene(arms);
+    uintptr_t child = node ? *(uintptr_t*)(node+64) : 0;
+    return remote_readable(child,OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK+8) ? child : 0;
 }
 static int RemoteEnsureMesh(uintptr_t entity, uint64_t mesh) {
     // Material rebuilds can replace/reset the scene node. Always reacquire it
@@ -338,7 +346,7 @@ static void RemoteRefresh(uintptr_t entity, uintptr_t item, const SkinCfg* cfg, 
 }
 static void RemoteRestore(uintptr_t client, RemoteCache* c) {
     uintptr_t pawn, entity;
-    if (c->valid && RemoteResolve(client,&c->entry,&pawn,&entity,0) &&
+    if (c->valid && RemoteResolve(client,&c->entry,&pawn,&entity,1) &&
         pawn == c->pawn && entity == c->entity && *(uintptr_t*)(entity+16) == c->identity && g_setAttr) {
         uintptr_t item = RemoteItem(entity,c->entry.kind);
         RemoteOriginal* o = &c->original;
@@ -385,36 +393,52 @@ static RemoteCache* RemoteCacheFor(const RemoteEntry* r) {
 }
 struct LocalSkinState {
     int valid;
-    uintptr_t pawn, entity, identity, scene, attachment, rules;
+    uintptr_t pawn, entity, identity, scene, attachment, hudChild, rules;
     uint32_t handle, pawnHandle, hudHandle;
     uint16_t target;
     SkinCfg cfg;
-    uint64_t lastApply, settleAt;
+    uint64_t lastApply, settleAt, lastSeen;
 };
-static LocalSkinState g_localSkin;
+static LocalSkinState g_localSkins[64];
+static LocalSkinState* g_localSkin = &g_localSkins[0];
+static LocalSkinState* LocalCacheFor(uint32_t handle, uintptr_t entity) {
+    LocalSkinState* slot = 0;
+    LocalSkinState* oldest = &g_localSkins[0];
+    for (int i = 0; i < 64; i++) {
+        LocalSkinState* c = &g_localSkins[i];
+        if (c->valid && c->handle == handle && c->entity == entity) return c;
+        if (!c->valid && !slot) slot = c;
+        if (c->lastSeen < oldest->lastSeen) oldest = c;
+    }
+    if (!slot) slot = oldest;
+    memset(slot,0,sizeof(*slot));
+    return slot;
+}
 
 static void ApplyLocalSkins(uintptr_t client) {
     BindingSession(client);
     uintptr_t rules = *(uintptr_t*)(client+OFF_DW_GAMERULES);
     uintptr_t pawn = *(uintptr_t*)(client+OFF_DW_LOCAL_PLAYER_PAWN);
     if (!rules || !remote_readable(pawn,OFF_M_HHUDMODELARMS+4) || *(int*)(pawn+R_HEALTH) <= 0) {
-        g_localSkin.valid = 0; return;
+        if (!rules || (remote_readable(pawn,R_HEALTH+4) && *(int*)(pawn+R_HEALTH) <= 0))
+            memset(g_localSkins,0,sizeof(g_localSkins));
+        return;
     }
     uintptr_t controller = ResolveEntity(client,*(uint32_t*)(pawn+R_CONTROLLER));
-    if (!remote_readable(controller,R_PLAYERPAWN+4)) { g_localSkin.valid = 0; return; }
+    if (!remote_readable(controller,R_PLAYERPAWN+4)) return;
     uint64_t player = *(uint64_t*)(controller+R_STEAMID);
     uint32_t pawnHandle = *(uint32_t*)(controller+R_PLAYERPAWN);
     uintptr_t ws = *(uintptr_t*)(pawn+OFF_M_PWEAPONSERVICES);
     if (!player || ResolveEntity(client,pawnHandle) != pawn || !remote_readable(ws,OFF_M_HACTIVEWEAPON+4)) {
-        g_localSkin.valid = 0; return;
+        return;
     }
     uint32_t handle = *(uint32_t*)(ws+OFF_M_HACTIVEWEAPON);
     uintptr_t entity = ResolveEntity(client,handle);
     if (!remote_readable(entity,5820) || *(uint32_t*)(entity+R_OWNER) != pawnHandle) {
-        g_localSkin.valid = 0; return;
+        return;
     }
     uintptr_t scene = RemoteScene(entity);
-    if (!scene || *(uint8_t*)(scene+259)) { g_localSkin.valid = 0; return; }
+    if (!scene || *(uint8_t*)(scene+259)) return;
     uint16_t def = *(uint16_t*)(RemoteItem(entity,0)+OFF_M_ITEMDEFINDEX);
     SkinCfg selected = {}; uint16_t target = 0;
     AcquireSRWLockShared(&g_lock);
@@ -431,34 +455,41 @@ static void ApplyLocalSkins(uintptr_t client) {
     if (inherited) { selected = binding->cfg; target = binding->target; }
     if (!target || is_glove_def(target) || !g_setAttr || !g_updateSkin || !g_setMask ||
         (is_knife_def(target) && (!g_setModel || !g_updateSubclass || !g_updateWeaponVm))) {
-        g_localSkin.valid = 0; return;
+        return;
     }
     const SkinCfg* cfg = &selected;
-    LocalSkinState* c = &g_localSkin;
+    LocalSkinState* c = LocalCacheFor(handle,entity);
+    g_localSkin = c;
     uint32_t hudHandle = *(uint32_t*)(pawn+OFF_M_HHUDMODELARMS);
     uintptr_t attachment = RemoteAttachment(client,pawn,entity);
+    uintptr_t hudChild = RemoteHudChild(client,pawn);
     int respawn = !c->valid || c->rules != rules || c->pawn != pawn || c->pawnHandle != pawnHandle;
     int selection = respawn || c->entity != entity || c->identity != *(uintptr_t*)(entity+16) ||
         c->handle != handle || c->target != target ||
         c->cfg.paint != cfg->paint || c->cfg.seed != cfg->seed || c->cfg.wear != cfg->wear ||
         c->cfg.meshMask != cfg->meshMask || !str_eq(c->cfg.model,cfg->model);
-    int recreated = c->scene != scene || c->hudHandle != hudHandle || c->attachment != attachment;
+    int recreated = c->scene != scene || c->hudHandle != hudHandle || c->attachment != attachment || c->hudChild != hudChild;
     uint64_t tick = GetTickCount64();
     RepairSkinFields(entity,cfg,target);
-    int wrong = SkinAttributesWrong(entity,cfg) || KnifePresentationWrong(entity,cfg,target);
+    int presentationWrong = KnifePresentationWrong(entity,cfg,target);
+    int wrong = SkinAttributesWrong(entity,cfg) || presentationWrong;
     int settling = c->settleAt && tick >= c->settleAt;
     if (selection || recreated || ((wrong || settling) && tick-c->lastApply >= 750)) {
+        DllLog("local refresh begin: def=%u paint=%d seed=%d stage=%s entity=%p",
+            (unsigned)target,cfg->paint,cfg->seed,settling ? "finalize" : "apply",(void*)entity);
         PokeFields(entity,cfg,target,true); // preserve the real original-owner XUID
         RefreshWeaponMaterials(entity,cfg);
-        ApplyKnifePresentation(client,pawn,entity,cfg,target);
+        if (respawn || recreated || c->target != target || presentationWrong)
+            ApplyKnifePresentation(client,pawn,entity,cfg,target);
         c->lastApply = tick;
-        // One delayed rebuild after a new pawn, not a recurring refresh timer.
-        // This lets late spawn initialization finish before committing materials.
-        if (respawn) c->settleAt = tick+750;
+        // Model/subclass initialization can reset composite materials without
+        // changing attributes. Finalize each new selection/context once, AFTER
+        // that initialization; never SetModel again during material finalization.
+        if (selection || recreated || presentationWrong) c->settleAt = tick+750;
         else if (settling) c->settleAt = 0;
         DllLog("local apply: def=%u paint=%d seed=%d inherited=%d reason=%s",
             (unsigned)target,cfg->paint,cfg->seed,inherited,
-            respawn ? "pawn_ready" : selection ? "selection" : recreated ? "scene_replaced" : settling ? "spawn_settle" : "state_reset");
+            respawn ? "pawn_ready" : selection ? "selection" : recreated ? "scene_replaced" : settling ? "material_finalize" : "state_reset");
     }
     RemoteVisualMeshes(client,pawn,entity,cfg->meshMask);
     c->valid = 1; c->rules = rules; c->pawn = pawn; c->pawnHandle = pawnHandle;
@@ -466,6 +497,7 @@ static void ApplyLocalSkins(uintptr_t client) {
     c->identity = *(uintptr_t*)(entity+16);
     c->scene = RemoteScene(entity); c->hudHandle = hudHandle;
     c->attachment = RemoteAttachment(client,pawn,entity);
+    c->hudChild = RemoteHudChild(client,pawn); c->lastSeen = tick;
     RememberWeaponSkin(client,handle,entity,player,target,cfg);
 }
 
@@ -520,7 +552,10 @@ static void ApplyRemoteSkins(uintptr_t client) {
             c->identity != *(uintptr_t*)(entity+16) || !RemoteSame(&c->entry,r);
         uint32_t hudHandle = *(uint32_t*)(pawn+OFF_M_HHUDMODELARMS);
         uintptr_t attachment = RemoteAttachment(client,pawn,entity);
-        int recreated = c->valid && (c->scene != scene || c->hudHandle != hudHandle || c->attachment != attachment);
+        uintptr_t hudChild = RemoteHudChild(client,pawn);
+        int recreated = c->valid && (c->scene != scene || c->hudHandle != hudHandle ||
+            c->attachment != attachment || c->hudChild != hudChild);
+        int modelChanged = !c->valid || c->entry.target != r->target || !str_eq(c->entry.cfg.model,r->cfg.model);
         int changed = selectionChanged || recreated;
         if (!changed) {
             RepairSkinFields(entity,&r->cfg,r->target);
@@ -528,8 +563,9 @@ static void ApplyRemoteSkins(uintptr_t client) {
         // Inspect every pass, but rate-limit expensive repairs independently.
         int attributesWrong = SkinAttributesWrong(entity,&r->cfg);
         int presentationWrong = KnifePresentationWrong(entity,&r->cfg,r->target);
+        int settling = c->valid && c->settleAt && tick >= c->settleAt;
         if (!changed && tick-c->lastApply >= 750) {
-            changed = attributesWrong || presentationWrong;
+            changed = attributesWrong || presentationWrong || settling;
         }
         if (!changed) {
             RememberWeaponSkin(client,r->handle,entity,r->player,r->target,&r->cfg);
@@ -549,23 +585,28 @@ static void ApplyRemoteSkins(uintptr_t client) {
             RemoteCapture(c);
         }
         c->entry = *r;
+        DllLog("remote refresh begin: slot=%u def=%u paint=%d seed=%d stage=%s entity=%p",
+            r->slot,(unsigned)r->target,r->cfg.paint,r->cfg.seed,settling ? "finalize" : "apply",(void*)entity);
         PokeFields(entity,&r->cfg,r->target,true);
         RemoteRefresh(entity,item,&r->cfg,r->kind);
         // Preserve the working local ordering: materials first, then knife
         // model + HUD model + subclass + attachment/viewmodel refresh.
-        if (is_knife_def(r->target) && (selectionChanged || recreated || presentationWrong))
+        if (is_knife_def(r->target) && (modelChanged || recreated || presentationWrong))
             ApplyKnifePresentation(client,pawn,entity,&r->cfg,r->target);
         RemoteVisualMeshes(client,pawn,entity,r->cfg.meshMask);
         c->valid = 1;
         c->scene = r->kind ? 0 : RemoteScene(entity);
         c->hudHandle = hudHandle;
         c->attachment = RemoteAttachment(client,pawn,entity);
+        c->hudChild = RemoteHudChild(client,pawn);
         c->lastApply = tick;
+        if (selectionChanged || recreated || presentationWrong) c->settleAt = tick+750;
+        else if (settling) c->settleAt = 0;
         RememberWeaponSkin(client,r->handle,entity,r->player,r->target,&r->cfg);
         char playerText[21]; RemotePlayerString(r->player,playerText);
-        DllLog("remote apply: player=%s slot=%u def=%u paint=%d mesh=%d reason=%s entity=%p",
-            playerText,r->slot,(unsigned)r->target,r->cfg.paint,r->cfg.meshMask,
-            selectionChanged ? "selection" : recreated ? "scene_replaced" : "attributes_reset",(void*)entity);
+        DllLog("remote apply: player=%s slot=%u def=%u paint=%d seed=%d mesh=%d reason=%s entity=%p",
+            playerText,r->slot,(unsigned)r->target,r->cfg.paint,r->cfg.seed,r->cfg.meshMask,
+            selectionChanged ? "selection" : recreated ? "scene_replaced" : settling ? "material_finalize" : "state_reset",(void*)entity);
     }
     for (int i = 0; i < REMOTE_CACHE_CAPACITY && budget > 0; i++) {
         if (g_remoteCache[i].valid && !g_remoteCache[i].wanted) {
@@ -573,13 +614,9 @@ static void ApplyRemoteSkins(uintptr_t client) {
             // Keep each owned weapon's baseline while its player holds a
             // different shared weapon. Switching back must not undo/reapply it.
             if (sessionValid) {
-                int playerPresent = 0;
-                for (int j = 0; j < count; j++)
-                    if (!g_remote[j].kind && g_remote[j].player == old->entry.player && g_remote[j].pawn == old->entry.pawn)
-                        playerPresent = 1;
                 uintptr_t pawn, entity;
-                if (playerPresent && RemoteResolve(client,&old->entry,&pawn,&entity,0) &&
-                    pawn == old->pawn && entity == old->entity) {
+                if (RemoteResolve(client,&old->entry,&pawn,&entity,0) &&
+                    pawn == old->pawn && entity == old->entity && *(uintptr_t*)(entity+16) == old->identity) {
                     uintptr_t ws = *(uintptr_t*)(pawn+OFF_M_PWEAPONSERVICES);
                     if (remote_readable(ws,OFF_M_HACTIVEWEAPON+4) &&
                         *(uint32_t*)(ws+OFF_M_HACTIVEWEAPON) != old->entry.handle) continue;
@@ -587,7 +624,7 @@ static void ApplyRemoteSkins(uintptr_t client) {
             }
             // Sampling/render visibility can briefly disappear while switching.
             // Expired files/sessions still restore immediately.
-            if (sessionValid && GetTickCount64()-g_remoteCache[i].lastSeen < 1500) continue;
+            if (sessionValid && GetTickCount64()-g_remoteCache[i].lastSeen < 3000) continue;
             RemoteRestore(client,&g_remoteCache[i]); budget--;
         }
     }

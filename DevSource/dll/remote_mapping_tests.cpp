@@ -21,14 +21,21 @@ static void __fastcall FakeUpdate(void* entity,bool) {
     updateCalls++;
     // Reproduce a material refresh resetting the visible mesh.
     uintptr_t node = *(uintptr_t*)((uintptr_t)entity+OFF_M_PGAMESCENENODE);
-    if (node) *(uint64_t*)(node+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) = 0;
+    if (node) {
+        *(uint64_t*)(node+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) = 0;
+        *(int*)(node+1000) = 1; // fixture-only rendered-material readiness
+    }
 }
 static void __fastcall FakeModel(void* entity,const char* model) {
     modelCalls++;
     uintptr_t node = *(uintptr_t*)((uintptr_t)entity+OFF_M_PGAMESCENENODE);
     uintptr_t name = Allocate(4096);
     copy_str((char*)name,model,320);
-    if (node) *(uintptr_t*)(node+OFF_M_MODELSTATE+168) = name;
+    if (node) {
+        *(uintptr_t*)(node+OFF_M_MODELSTATE+168) = name;
+        // Model initialization can invalidate materials without losing attrs.
+        *(int*)(node+1000) = 0;
+    }
 }
 static void __fastcall FakeMask(void* node,uint64_t mesh) {
     *(uint64_t*)((uintptr_t)node+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) = mesh;
@@ -41,6 +48,9 @@ static uintptr_t Allocate(SIZE_T size) {
 static void Check(int value, unsigned code) { if (!value) ExitProcess(code); }
 
 extern "C" void RemoteTestMain() {
+    // Fixtures must not append simulated applies to the user's real game log.
+    copy_str(g_configPath,"fixture-only",MAX_PATH);
+    copy_str(g_logPath,"NUL",MAX_PATH);
     uintptr_t client = Allocate(40*1024*1024), list = Allocate(4096), chunk = Allocate(512*0x70);
     uintptr_t local = Allocate(12000), localController = Allocate(4000);
     uintptr_t pawn = Allocate(12000), controller = Allocate(4000);
@@ -264,7 +274,7 @@ extern "C" void RemoteTestMain() {
     ApplyLocalSkins(client);
     Check(RemoteAttr(donatedItem,7,-1) == 400 && *(uint16_t*)(donatedItem+OFF_M_ITEMDEFINDEX) == 515,44);
     *(int*)(donatedItem+528) = 0; // all material attributes disappear
-    g_localSkin.lastApply = GetTickCount64()-1000;
+    g_localSkin->lastApply = GetTickCount64()-1000;
     ApplyLocalSkins(client);
     Check(RemoteAttr(donatedItem,7,-1) == 400 && RemoteAttr(donatedItem,6,-1) == 568,45);
     *(int*)(donated+OFF_M_FALLBACKSEED) = 0;
@@ -275,10 +285,13 @@ extern "C" void RemoteTestMain() {
     *(uint32_t*)(donated+R_OWNER) = 0x10065;
     ApplyLocalSkins(client);
     Check(updateCalls == beforeRepair+1 && RemoteAttr(donatedItem,7,-1) == 400,47);
+    Check(*(int*)(donatedNode+1000) == 0,54);
+    int beforeFinalizeModels = modelCalls;
     // One spawn-settle rebuild, then stable again (no recurring timer).
-    g_localSkin.settleAt = GetTickCount64()-1; g_localSkin.lastApply = GetTickCount64()-1000;
+    g_localSkin->settleAt = GetTickCount64()-1; g_localSkin->lastApply = GetTickCount64()-1000;
     ApplyLocalSkins(client);
-    Check(updateCalls == beforeRepair+2 && !g_localSkin.settleAt,48);
+    Check(updateCalls == beforeRepair+2 && !g_localSkin->settleAt,48);
+    Check(modelCalls == beforeFinalizeModels && *(int*)(donatedNode+1000) == 1,55);
     ApplyLocalSkins(client); Check(updateCalls == beforeRepair+2,49);
     // Current ownership is mandatory even when an active handle is stale.
     *(uint32_t*)(donated+R_OWNER) = 0x8064;
@@ -297,6 +310,59 @@ extern "C" void RemoteTestMain() {
     // Map/session transition clears all physical-weapon bindings.
     *(uintptr_t*)(client+OFF_DW_GAMERULES) = 234567;
     Check(!FindWeaponBinding(client,0x100ca,donated),50);
+    // Remote model finalization uses the same material-only second stage.
+    memset(g_remoteCache,0,sizeof(g_remoteCache));
+    g_remoteRules = 234567;
+    *(uint32_t*)(weapon+R_OWNER) = 0x8064;
+    *(uint32_t*)(ws+OFF_M_HACTIVEWEAPON) = saved.handle;
+    *(uint16_t*)(item+OFF_M_ITEMDEFINDEX) = 42;
+    g_remote[0] = saved; g_remote[0].source = 42; g_remote[0].target = 515;
+    g_remote[0].cfg = g_skins[0].cfg; g_remoteCount = 1;
+    g_remoteDeadline = remote_now_ms()+3000; g_remoteReadTick = GetTickCount64();
+    ApplyRemoteSkins(client);
+    Check(*(int*)(node+1000) == 0 && !SkinAttributesWrong(weapon,&g_remote[0].cfg),56);
+    cache = RemoteCacheFor(&g_remote[0]);
+    cache->settleAt = GetTickCount64()-1; cache->lastApply = GetTickCount64()-1000;
+    beforeFinalizeModels = modelCalls;
+    g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    Check(modelCalls == beforeFinalizeModels && *(int*)(node+1000) == 1 && !cache->settleAt,57);
+    // Selecting a new paint on the SAME knife must not reset the world model.
+    g_remote[0].cfg.paint = 570;
+    g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    Check(modelCalls == beforeFinalizeModels && cache->settleAt != 0,58);
+    // Unconfigured pistol: no bridge record, but retain the holstered knife.
+    *(uint32_t*)(ws+OFF_M_HACTIVEWEAPON) = 0x80c9;
+    g_remoteCount = 0; cache->lastSeen = GetTickCount64()-10000;
+    beforeRepair = updateCalls;
+    g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    Check(cache->valid && updateCalls == beforeRepair,59);
+    *(uint32_t*)(ws+OFF_M_HACTIVEWEAPON) = saved.handle;
+    g_remoteCount = 1; g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    Check(updateCalls == beforeRepair,60);
+    // Local switching also reuses the physical weapon's settled cache.
+    *(uint32_t*)(localWs+OFF_M_HACTIVEWEAPON) = 0x100ca;
+    g_skins[0].def = 515; ApplyLocalSkins(client);
+    LocalSkinState* knifeCache = g_localSkin;
+    knifeCache->settleAt = 0;
+    *(uint32_t*)(pistol+R_OWNER) = 0x10065;
+    *(uint32_t*)(localWs+OFF_M_HACTIVEWEAPON) = 0x80c9;
+    g_skin_count = 2; g_skins[1].def = 4; g_skins[1].cfg = saved.cfg;
+    ApplyLocalSkins(client);
+    beforeRepair = updateCalls;
+    *(uint32_t*)(localWs+OFF_M_HACTIVEWEAPON) = 0x100ca;
+    ApplyLocalSkins(client);
+    Check(g_localSkin == knifeCache && updateCalls == beforeRepair,61);
+    // A transient invalid active handle is not a new pawn/selection.
+    *(uint32_t*)(localWs+OFF_M_HACTIVEWEAPON) = 0xffffffffu;
+    ApplyLocalSkins(client);
+    *(uint32_t*)(localWs+OFF_M_HACTIVEWEAPON) = 0x100ca;
+    ApplyLocalSkins(client); Check(updateCalls == beforeRepair,62);
+    // Incomplete local files cannot partially replace the current loadout.
+    int previousCount = g_skin_count;
+    const char incomplete[] = "9 1206 400";
+    Check(!CommitLocalConfig(incomplete,incomplete+sizeof(incomplete)-1) && g_skin_count == previousCount,63);
+    const char complete[] = "515 568 400 0.01 1 weapons/models/knife/knife_butterfly/weapon_knife_butterfly.vmdl\n";
+    Check(CommitLocalConfig(complete,complete+sizeof(complete)-1) && g_skin_count == 1 && g_skins[0].cfg.seed == 400,64);
     // Malformed/overflow input fails closed, clearing the render batch.
     const char badFile[] = "CS2PY_REMOTE_V1 18446744073709551616 0 0 0";
     Check(!RemoteParse(badFile,badFile+sizeof(badFile)-1) && g_remoteCount == 0,16);

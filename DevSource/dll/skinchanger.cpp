@@ -23,21 +23,23 @@ extern "C" int _fltused = 0;
 // link the C runtime. On x64 the linker matches these by symbol name only.
 #pragma function(memset, memcpy, memmove)
 extern "C" void* __cdecl memset(void* dst, int c, SIZE_T n) {
-    unsigned char* d = (unsigned char*)dst;
+    // Volatile byte accesses prevent /O2 from rewriting these CRT replacements
+    // into calls to themselves (observed recursive memcpy / stack overflow).
+    volatile unsigned char* d = (volatile unsigned char*)dst;
     for (SIZE_T i = 0; i < n; i++) d[i] = (unsigned char)c;
     return dst;
 }
 
 extern "C" void* __cdecl memcpy(void* dst, const void* src, SIZE_T n) {
-    unsigned char* d = (unsigned char*)dst;
-    const unsigned char* s = (const unsigned char*)src;
+    volatile unsigned char* d = (volatile unsigned char*)dst;
+    const volatile unsigned char* s = (const volatile unsigned char*)src;
     for (SIZE_T i = 0; i < n; i++) d[i] = s[i];
     return dst;
 }
 
 extern "C" void* __cdecl memmove(void* dst, const void* src, SIZE_T n) {
-    unsigned char* d = (unsigned char*)dst;
-    const unsigned char* s = (const unsigned char*)src;
+    volatile unsigned char* d = (volatile unsigned char*)dst;
+    const volatile unsigned char* s = (const volatile unsigned char*)src;
     if (d < s) { for (SIZE_T i = 0; i < n; i++) d[i] = s[i]; }
     else { for (SIZE_T i = n; i > 0; i--) d[i - 1] = s[i - 1]; }
     return dst;
@@ -420,45 +422,46 @@ static void parse_token(const char** s, const char* end, char* out, int cap) {
     out[i] = 0;
 }
 
-static void ReadConfig() {
-    ResolveUserPaths();
-    HANDLE f = CreateFileA(g_configPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (f == INVALID_HANDLE_VALUE) return;
-    DWORD size = GetFileSize(f, NULL);
-    if (size == 0) { g_skin_count = 0; CloseHandle(f); return; }
-    if (size >= sizeof(g_filebuf)) { CloseHandle(f); return; }
-    DWORD rd = 0;
-    if (!ReadFile(f, g_filebuf, size, &rd, NULL)) { CloseHandle(f); return; }
-    CloseHandle(f);
-
-    AcquireSRWLockExclusive(&g_lock);
-    g_skin_count = 0;
-    const char* s = g_filebuf;
-    const char* end = g_filebuf + rd;
+static SkinEntry g_pendingSkins[64];
+static int CommitLocalConfig(const char* s, const char* end) {
+    int count = 0;
     while (s < end) {
+        skip_ws(&s,end);
+        if (s == end) break;
         int def = 0, paint = 0, seed = 0, mesh = 1;
         float wear = 0.0f;
-        char model[320];
-        model[0] = 0;
-        if (!parse_i32(&s, end, &def)) break;
-        if (!parse_i32(&s, end, &paint)) break;
-        if (!parse_i32(&s, end, &seed)) break;
-        if (!parse_float(&s, end, &wear)) break;
-        if (!parse_i32(&s, end, &mesh)) break;
-        parse_token(&s, end, model, sizeof(model));
+        char model[320]; model[0] = 0;
+        if (!parse_i32(&s,end,&def) || !parse_i32(&s,end,&paint) ||
+            !parse_i32(&s,end,&seed) || !parse_float(&s,end,&wear) ||
+            !parse_i32(&s,end,&mesh)) return 0;
+        parse_token(&s,end,model,sizeof(model));
+        if (def <= 0 || def > 65535 || paint < 0 || paint > 1000000 ||
+            seed < 0 || seed > 1000000 || !(wear >= 0 && wear <= 1) ||
+            (mesh != 1 && mesh != 2) || !model[0]) return 0;
         if (model[0] == '-' && model[1] == 0) model[0] = 0;
-        if (g_skin_count < 64 && !is_glove_def((uint16_t)def)) {
-            g_skins[g_skin_count].def = (uint16_t)def;
-            g_skins[g_skin_count].cfg.paint = paint;
-            g_skins[g_skin_count].cfg.seed = seed;
-            g_skins[g_skin_count].cfg.wear = wear;
-            g_skins[g_skin_count].cfg.meshMask = mesh;
-            copy_str(g_skins[g_skin_count].cfg.model, model, (int)sizeof(model));
-            g_skin_count++;
-        }
+        if (is_glove_def((uint16_t)def)) continue;
+        if (count >= 64) return 0;
+        SkinEntry* entry = &g_pendingSkins[count++];
+        entry->def = (uint16_t)def;
+        entry->cfg.paint = paint; entry->cfg.seed = seed;
+        entry->cfg.wear = wear; entry->cfg.meshMask = mesh;
+        copy_str(entry->cfg.model,model,sizeof(model));
     }
+    AcquireSRWLockExclusive(&g_lock);
+    memcpy(g_skins,g_pendingSkins,count*sizeof(SkinEntry));
+    g_skin_count = count;
     ReleaseSRWLockExclusive(&g_lock);
+    return 1;
+}
+static void ReadConfig() {
+    ResolveUserPaths();
+    HANDLE f = CreateFileA(g_configPath,GENERIC_READ,FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD size = GetFileSize(f,NULL), rd = 0;
+    int ok = size < sizeof(g_filebuf) && ReadFile(f,g_filebuf,size,&rd,NULL) && rd == size;
+    CloseHandle(f);
+    if (ok) CommitLocalConfig(g_filebuf,g_filebuf+rd);
 }
 
 // ---- entity resolution --------------------------------------------------
@@ -467,9 +470,13 @@ static uintptr_t ResolveEntity(uintptr_t client, uint32_t handle) {
     if (!handle || handle == 0xFFFFFFFFu) return 0;
     uintptr_t entityList = *(uintptr_t*)(client + OFF_DW_ENTITY_LIST);
     if (!entityList || !safe_ptr(entityList)) return 0;
-    uintptr_t listEntry = *(uintptr_t*)(entityList + 0x8 * ((handle & 0x7FFF) >> 9) + 0x10);
+    uintptr_t listSlot = entityList + 0x8 * ((handle & 0x7FFF) >> 9) + 0x10;
+    if (IsBadReadPtr((void*)listSlot,8)) return 0;
+    uintptr_t listEntry = *(uintptr_t*)listSlot;
     if (!listEntry || !safe_ptr(listEntry)) return 0;
-    return *(uintptr_t*)(listEntry + 0x70 * (handle & 0x1FF));
+    uintptr_t entitySlot = listEntry + 0x70 * (handle & 0x1FF);
+    if (IsBadReadPtr((void*)entitySlot,8)) return 0;
+    return *(uintptr_t*)entitySlot;
 }
 
 // ---- skin application ---------------------------------------------------
@@ -655,7 +662,7 @@ static void Loop() {
         return;
     }
     DllLog("loop: client.dll base=%p", (void*)client);
-    DllLog("skin-share renderer: version=4 physical weapon bindings; local/shared integrity checks; gloves disabled");
+    DllLog("skin-share renderer: version=5 per-weapon settling and stable switch caches; gloves disabled");
     ResolveFunctions();
     DllLog("loop: entering main loop, skins=%d", g_skin_count);
 
@@ -667,7 +674,7 @@ static void Loop() {
         if (!rules || rules != lastRules || list != lastList) {
             // Never dereference pointers cached from a previous map.
             memset(g_remoteCache,0,sizeof(g_remoteCache));
-            memset(&g_localSkin,0,sizeof(g_localSkin));
+            memset(g_localSkins,0,sizeof(g_localSkins));
             BindingSession(client);
             lastRules = rules; lastList = list;
         }
@@ -680,7 +687,21 @@ static void Loop() {
 }
 
 static DWORD WINAPI LoopThread(LPVOID) {
+    // Process-scoped singleton: restarting the Python tool must not create a
+    // second cosmetic loop fighting the first over the same weapon state.
+    char name[80] = "Local\\CS2pySkinRenderer_";
+    int offset = 0;
+    while (name[offset]) offset++;
+    int count = u32toa(name+offset,GetCurrentProcessId());
+    name[offset+count] = 0;
+    HANDLE guard = CreateMutexA(0,FALSE,name);
+    if (!guard || GetLastError() == ERROR_ALREADY_EXISTS) {
+        DllLog("renderer already running or guard unavailable; duplicate loop stopped; restart CS2 for DLL updates");
+        if (guard) CloseHandle(guard);
+        return 0;
+    }
     Loop();
+    CloseHandle(guard);
     return 0;
 }
 

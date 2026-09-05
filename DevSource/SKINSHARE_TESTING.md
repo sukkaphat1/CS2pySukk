@@ -20,7 +20,7 @@ Logs are in the Windows user profile:
 
 - cs2py_skinshare_debug.log: `mapped player=... slot=... def=... paint_kit=...`
   confirms a fresh relay selection was mapped to receiver-local equipment.
-- cs2py_dll.log: `skin-share renderer: version=4` confirms the new DLL loaded;
+- cs2py_dll.log: `skin-share renderer: version=5` confirms the new DLL loaded;
   `remote apply: player=... slot=... kind=... def=... paint=...` confirms the
   native identity checks passed and the apply functions were called.
 - `received selection` includes the receiver's paint/mesh lookup;
@@ -113,9 +113,61 @@ tool can leave the previous injected DLL loaded). Confirm `version=4` in the log
    seed, pickup/respawn event and viewing perspective. `local apply` reports
    `inherited=1` for a remembered donor gun and the refresh reason.
 
-## Automated checks
+## Version 5: selection settling, switch stability and diagnostics
+
+The reviewed version-4 logs showed the same remote knife/entity repeatedly
+applied with `reason=selection`, with bridge target gaps between updates. Local
+weapon switches also triggered full applications of unchanged selections. These
+are confirmed refresh/cache issues, not proof that the relay lost a seed.
+
+- Local weapons now have separate bounded caches. Switching back, or briefly
+  seeing an invalid active handle, does not by itself rebuild an unchanged skin.
+- A verified remote holstered weapon retains its cache even when the newly held
+  gun has no selected/shared skin and therefore produces no bridge target.
+  Active-target sampling gaps have a three-second grace period. Expired bridge
+  sessions stop peer applications; restoration only calls game functions for a
+  currently active, living, non-dormant, ownership-verified target.
+- Every new selection or presentation context schedules one material-only
+  finalization after 750 ms. This covers model initialization clearing materials
+  while paint/seed attributes remain correct. Neither this finalization nor a
+  paint-only change resets a correct knife world model. Repeated timer-based
+  finalizations are not scheduled for a stable weapon.
+- HUD child recreation is tracked as well as weapon scene/attachment changes.
+  This detects more viewmodel lifecycle changes without guessing transforms.
+- Local config updates are atomic, can commit changes every 100 ms, and retry
+  failed replacements. The native parser commits only complete valid loadouts.
+  Remote bridge writes/reads use 250 ms cadence; network and roster-sampling
+  latency still exist. This is not a guarantee of instantaneous presentation.
+- Entity-list pointer reads have additional readability guards. A process-scoped
+  singleton prevents two **version-5** cosmetic loops after restarting the tool.
+  It cannot stop an already loaded older renderer: a full CS2 restart is required.
+- The optimized fake-memory test exposed recursive compiler optimization of a
+  CRT replacement copy helper. Volatile byte accesses prevent that recursion.
+  This was reproduced and fixed in testing; it does not establish the cause of
+  a reported crash on another PC. Concurrent game lifecycle races remain possible.
+- Refresh begin/completion logs now include paint and seed, and distinguish
+  `material_finalize` from selection/state repairs. Bridge logs include seeds.
+  A begin line without completion helps narrow a crash but is not a stack trace.
+
+**Testing:** restart CS2 and the Dev launcher on both PCs, confirm `version=5`,
+then choose Butterfly Gamma Doppler/seed 400 before joining. Hold it for two
+seconds, inspect both views, respawn and retest. Change AWP Printstream while
+the other tester watches; switch to a gun with no selected skin and back; repeat
+the donor drop/pickup checks. Gloves remain disabled.
+
+Pixels are not inspected by the integrity checks. Do not call a blank material
+fixed, or a crash resolved, based only on correct attributes or passing fixtures.
+For a crash, provide the console traceback (if any), both cosmetic logs and the
+crash time; a game crash dump/faulting module is needed for native stack analysis.
+
+## Automated checks (current)
 
 Run `python -m unittest discover -s tests -p test_skinshare_mapping.py -v`.
+With the installed application Python runtime/dependencies, run
+`python -m unittest discover -s tests -p "test_skin*.py" -v` to include the atomic
+writer/retry tests. Native fixtures also simulate model setup clearing materials
+while attributes remain correct, material-only finalization, cache retention across
+unconfigured weapons, local switch reuse, and incomplete config rejection.
 Run `node --test cloudflare/skinshare-relay/test/relay.test.js`.
 Native fixture: compile dll/remote_mapping_tests.cpp CRT-free with kernel32.lib,
 /GS-, /NODEFAULTLIB, /ENTRY:RemoteTestMain, /SUBSYSTEM:CONSOLE; exit code 0 passes.

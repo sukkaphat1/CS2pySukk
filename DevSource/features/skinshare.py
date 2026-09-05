@@ -359,7 +359,7 @@ class SkinShareClient:
         now = time.monotonic()
         if now < self._next_render_write:
             return
-        self._next_render_write = now + 0.5
+        self._next_render_write = now + 0.25
         with self._lock:
             snapshot = self._last_snapshot
             fresh = (now - self._last_main_update <= MAIN_UPDATE_TIMEOUT_SECONDS
@@ -375,7 +375,7 @@ class SkinShareClient:
                 for record in records:
                     _log(f"mapped player={record['player_id']} slot={record['slot']} "
                          f"kind={'gloves' if record['kind'] else 'weapon'} "
-                         f"def={record['target']} paint_kit={record['paint']} model={record['model']}")
+                         f"def={record['target']} paint_kit={record['paint']} seed={record['seed']} model={record['model']}")
             self._last_render_error = None
         except Exception as exc:
             name = type(exc).__name__
@@ -507,7 +507,7 @@ class SkinShareClient:
                 resolved = skinshare_apply.resolve_selection(record, database)
                 if resolved:
                     _log(f"received selection player={player_id} item={item_key} "
-                         f"paint_kit={resolved['paint']} mesh={resolved['mesh']}")
+                         f"paint_kit={resolved['paint']} seed={resolved['seed']} mesh={resolved['mesh']}")
                 else:
                     _log(f"rejected selection player={player_id} item={item_key} reason=local_database_validation")
 

@@ -22,6 +22,7 @@ import time
 from functions import memfuncs
 from ext import items
 from features import inject
+from features.skinshare_apply import write_atomic
 
 
 def get_active_weapon(processHandle, clientBaseAddress, Offsets):
@@ -303,7 +304,7 @@ def _write_skin_config(Options):
     """Write the skin config to %USERPROFILE%\\cs2py_skin.txt for the injected DLL."""
     global _last_cfg_write, _last_cfg_content
     now = time.monotonic()
-    if now - _last_cfg_write < 1.0:
+    if now - _last_cfg_write < 0.1:
         return
     _last_cfg_write = now
     try:
@@ -328,9 +329,10 @@ def _write_skin_config(Options):
         content = "\n".join(lines) + ("\n" if lines else "")
         if content == _last_cfg_content:
             return  # unchanged: skip the rewrite + log spam
+        # The native reader must never see a truncated/intermediate loadout.
+        # Only mark it committed after replacement succeeds, so failures retry.
+        write_atomic(_CONFIG_PATH, content)
         _last_cfg_content = content
-        with open(_CONFIG_PATH, "w") as f:
-            f.write(content)
         print(f"[skin-changer] wrote {len(lines)} skin config line(s)")
         _log(f"write ok: {len(lines)} line(s) -> " + " | ".join(lines))
     except Exception as e:
