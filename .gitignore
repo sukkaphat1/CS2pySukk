@@ -7,8 +7,10 @@ build/
 dist/*
 !dist/cs2py.exe
 !dist/CS2pyLauncher.exe
+!dist/CS2pyDev.exe
 dist.zip
 *.spec
+!CS2pyDev.spec
 *.obj
 
 # Local item schema source (large Valve VDF, only needed to rebuild the cache)

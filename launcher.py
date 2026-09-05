@@ -27,7 +27,16 @@ import urllib.request
 
 REPO_URL = "https://github.com/sukkaphat1/CS2pySukk.git"
 BRANCH = "main"
-INSTALL_DIR = os.path.join(os.path.expanduser("~"), "Documents", "CS2pySukk")
+INSTALL_DIR = os.environ.get(
+    "CS2PY_INSTALL_DIR",
+    os.path.join(os.path.expanduser("~"), "Documents", "CS2pySukk"),
+)
+SOURCE_SUBDIR = os.environ.get("CS2PY_SOURCE_SUBDIR", "").strip("\\/")
+RUNTIME_DIR = (
+    os.path.join(INSTALL_DIR, SOURCE_SUBDIR)
+    if SOURCE_SUBDIR
+    else INSTALL_DIR
+)
 MAIN_SCRIPT = "main.py"
 REQUIREMENTS = "requirements.txt"
 VERSION_FILE = "version.txt"
@@ -223,21 +232,41 @@ def git_run(args, cwd=None):
 def ensure_cloned():
     if not os.path.isdir(INSTALL_DIR):
         log(f"First run: cloning {REPO_URL} ...")
-        r = git_run(f"clone --depth 1 --branch {BRANCH} \"{REPO_URL}\" \"{INSTALL_DIR}\"")
+        sparse = " --sparse" if SOURCE_SUBDIR else ""
+        r = git_run(
+            f"clone --depth 1 --branch {BRANCH}{sparse} "
+            f"\"{REPO_URL}\" \"{INSTALL_DIR}\""
+        )
         if r.returncode != 0:
             log(f"[ERROR] git clone failed:\n{r.stdout}")
             return False
+        if SOURCE_SUBDIR:
+            r = git_run(
+                f"sparse-checkout set \"{SOURCE_SUBDIR}\"",
+                cwd=INSTALL_DIR,
+            )
+            if r.returncode != 0:
+                log(f"[ERROR] could not select {SOURCE_SUBDIR}:\n{r.stdout}")
+                return False
         log("Clone complete.")
         return True
     if not os.path.isdir(os.path.join(INSTALL_DIR, ".git")):
         log(f"[ERROR] {INSTALL_DIR} exists but is not a git repository.")
         log("Move or delete it and re-run the launcher.")
         return False
+    if SOURCE_SUBDIR:
+        r = git_run(
+            f"sparse-checkout set \"{SOURCE_SUBDIR}\"",
+            cwd=INSTALL_DIR,
+        )
+        if r.returncode != 0:
+            log(f"[ERROR] could not select {SOURCE_SUBDIR}:\n{r.stdout}")
+            return False
     return True
 
 
 def sync_and_verify():
-    local_main = os.path.join(INSTALL_DIR, MAIN_SCRIPT)
+    local_main = os.path.join(RUNTIME_DIR, MAIN_SCRIPT)
     if not os.path.isfile(local_main):
         log(f"[ERROR] {MAIN_SCRIPT} missing after clone.")
         return None
@@ -250,7 +279,10 @@ def sync_and_verify():
         log(f"[WARN] git reset failed:\n{r.stdout}")
 
     local_v = _read_version()
-    r = git_run(f"show origin/{BRANCH}:{VERSION_FILE}", cwd=INSTALL_DIR)
+    remote_version_path = (
+        f"{SOURCE_SUBDIR}/{VERSION_FILE}" if SOURCE_SUBDIR else VERSION_FILE
+    )
+    r = git_run(f"show origin/{BRANCH}:{remote_version_path}", cwd=INSTALL_DIR)
     remote_v = (r.stdout or "").strip()
     if remote_v:
         if local_v and local_v != remote_v:
@@ -266,7 +298,7 @@ def sync_and_verify():
 
 
 def _read_version():
-    p = os.path.join(INSTALL_DIR, VERSION_FILE)
+    p = os.path.join(RUNTIME_DIR, VERSION_FILE)
     try:
         with open(p, "r", encoding="utf-8") as f:
             return f.read().strip()
@@ -275,10 +307,10 @@ def _read_version():
 
 
 def ensure_dependencies():
-    req = os.path.join(INSTALL_DIR, REQUIREMENTS)
+    req = os.path.join(RUNTIME_DIR, REQUIREMENTS)
     if not os.path.isfile(req):
         return
-    marker = os.path.join(INSTALL_DIR, ".requirements_sha")
+    marker = os.path.join(RUNTIME_DIR, ".requirements_sha")
     try:
         with open(req, "r", encoding="utf-8") as f:
             req_text = f.read()
@@ -298,7 +330,7 @@ def ensure_dependencies():
         return
 
     log("Installing/updating Python dependencies ...")
-    r = py_run(["-m", "pip", "install", "-r", REQUIREMENTS], cwd=INSTALL_DIR)
+    r = py_run(["-m", "pip", "install", "-r", REQUIREMENTS], cwd=RUNTIME_DIR)
     if r.returncode != 0:
         log(f"[WARN] pip install had errors (continuing anyway):\n{r.stdout[-800:]}")
     else:
@@ -311,9 +343,11 @@ def ensure_dependencies():
 
 def main():
     log("=" * 60)
-    log("  CS2py Launcher")
+    log(f"  {os.environ.get('CS2PY_LAUNCHER_NAME', 'CS2py Launcher')}")
     log("=" * 60)
     log(f"Install dir: {INSTALL_DIR}")
+    if SOURCE_SUBDIR:
+        log(f"Source dir: {RUNTIME_DIR}")
 
     if not ensure_python():
         input("\nPress Enter to exit ...")
@@ -331,12 +365,12 @@ def main():
     ensure_dependencies()
     ensure_pymew()
 
-    log(f"\nLaunching {MAIN_SCRIPT} from {INSTALL_DIR} ...")
+    log(f"\nLaunching {MAIN_SCRIPT} from {RUNTIME_DIR} ...")
     log("(Keep this window open; it is the cheat's console.)\n")
 
     # Run main.py with the console attached (inherit stdio) so its input()
     # prompts (e.g. the Arduino question) show up and can be answered.
-    r = subprocess.call(_PY + [MAIN_SCRIPT], cwd=INSTALL_DIR)
+    r = subprocess.call(_PY + [MAIN_SCRIPT], cwd=RUNTIME_DIR)
     log(f"\n[cs2py exited with code {r}]")
     input("\nPress Enter to exit ...")
     return 0

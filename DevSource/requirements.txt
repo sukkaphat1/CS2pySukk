@@ -1,0 +1,11 @@
+dearpygui==2.0.0
+keyboard==0.13.5
+pymem==1.14.0
+pypresence==4.3.0
+pyserial==3.5
+pywin32==310
+requests==2.32.5
+zstandard==0.25.0
+psutil==7.0.0
+vdf==3.4
+websocket-client==1.8.0

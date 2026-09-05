@@ -1,0 +1,14 @@
+{
+  "name": "cs2py-skinshare-relay",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Private, ephemeral Cloudflare relay for CS2py skin-share rooms",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
