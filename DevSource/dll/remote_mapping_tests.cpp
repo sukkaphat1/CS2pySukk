@@ -4,16 +4,32 @@
 
 static int attrCalls = 0, updateCalls = 0, modelCalls = 0, vmCalls = 0;
 static uintptr_t vmWeapon = 0;
+static uintptr_t Allocate(SIZE_T size);
 static void __fastcall FakeWeaponVm(void* entity) { vmCalls++; vmWeapon = (uintptr_t)entity; }
 static void __fastcall FakeSubclass(void*) {}
-static void __fastcall FakeAttr(void*,const char*,float) { attrCalls++; }
+static void __fastcall FakeAttr(void* view,const char* name,float value) {
+    attrCalls++;
+    uintptr_t item = (uintptr_t)view, vec = item+528;
+    uintptr_t data = *(uintptr_t*)(vec+8);
+    if (!data) { data = Allocate(4096); *(uintptr_t*)(vec+8) = data; }
+    int index = str_contains(name,"prefab") ? 0 : str_contains(name,"seed") ? 1 : 2;
+    *(int*)vec = 3;
+    *(uint16_t*)(data+index*72+48) = (uint16_t)(index+6);
+    *(float*)(data+index*72+52) = value;
+}
 static void __fastcall FakeUpdate(void* entity,bool) {
     updateCalls++;
     // Reproduce a material refresh resetting the visible mesh.
     uintptr_t node = *(uintptr_t*)((uintptr_t)entity+OFF_M_PGAMESCENENODE);
     if (node) *(uint64_t*)(node+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) = 0;
 }
-static void __fastcall FakeModel(void*,const char*) { modelCalls++; }
+static void __fastcall FakeModel(void* entity,const char* model) {
+    modelCalls++;
+    uintptr_t node = *(uintptr_t*)((uintptr_t)entity+OFF_M_PGAMESCENENODE);
+    uintptr_t name = Allocate(4096);
+    copy_str((char*)name,model,320);
+    if (node) *(uintptr_t*)(node+OFF_M_MODELSTATE+168) = name;
+}
 static void __fastcall FakeMask(void* node,uint64_t mesh) {
     *(uint64_t*)((uintptr_t)node+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) = mesh;
 }
@@ -107,23 +123,23 @@ extern "C" void RemoteTestMain() {
     // A mesh-only reset is repaired without rebuilding all materials.
     *(uint64_t*)(node+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) = 1;
     g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
-    Check(*(uint64_t*)(node+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) == 2 && updateCalls == 1,20);
+    Check(*(uint64_t*)(node+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) == 2 && updateCalls == 2,20);
     // No scheduled material rebuilds: stable items stay stable while moving.
     RemoteCache* cache = RemoteCacheFor(&saved);
     g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
-    Check(updateCalls == 1,21);
+    Check(updateCalls == 2,21);
     g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
-    Check(updateCalls == 1,22);
+    Check(updateCalls == 2,22);
     g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
-    Check(updateCalls == 1,23);
+    Check(updateCalls == 2,23);
     *(int*)(weapon+OFF_M_FALLBACKPAINTKIT) = 0;
     g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
-    Check(*(int*)(weapon+OFF_M_FALLBACKPAINTKIT) == 756 && updateCalls == 1,28);
+    Check(*(int*)(weapon+OFF_M_FALLBACKPAINTKIT) == 756 && updateCalls == 2,28);
     // Recreated scene node triggers fresh material work and mesh restoration.
     uintptr_t replacementNode = Allocate(4096);
     *(uintptr_t*)(weapon+OFF_M_PGAMESCENENODE) = replacementNode;
     g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
-    Check(updateCalls == 2 && *(uint64_t*)(replacementNode+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) == 2,24);
+    Check(updateCalls == 3 && *(uint64_t*)(replacementNode+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) == 2,24);
     node = replacementNode;
     // AWP Printstream uses the new mesh; switching from a legacy paint must
     // finish on mesh 1 even when UpdateSkin clears it during rebuilding.
@@ -185,6 +201,102 @@ extern "C" void RemoteTestMain() {
     *(uint32_t*)(ws+OFF_M_HACTIVEWEAPON) = 0x80c8;
     g_remote[0] = saved; g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
     Check(updateCalls == beforeReturn && *(int*)(weapon+OFF_M_FALLBACKPAINTKIT) == 756,33);
+    // Missing seed must trigger a bounded repair even with correct fallback.
+    uintptr_t attrs = *(uintptr_t*)(item+536);
+    *(uint16_t*)(attrs+72+48) = 99;
+    cache = RemoteCacheFor(&saved); cache->lastApply = GetTickCount64()-1000;
+    int beforeRepair = updateCalls;
+    g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    Check(updateCalls == beforeRepair+1 && RemoteAttr(item,7,-1) == 7,34);
+    // A persistent reset is detected but cannot force a heavy call every pass.
+    *(float*)(attrs+72+52) = 0;
+    g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    Check(updateCalls == beforeRepair+1,35);
+    cache->lastApply = GetTickCount64()-1000;
+    g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    Check(RemoteAttr(item,7,-1) == 7 && updateCalls == beforeRepair+2,36);
+
+    // Remote -> ground -> local pickup: own AWP paint 344 must not replace 756.
+    uintptr_t localWs = Allocate(4096);
+    *(uintptr_t*)(chunk+0x70*101) = local;
+    *(uint32_t*)(localController+R_PLAYERPAWN) = 0x8065;
+    *(int*)(local+R_HEALTH) = 100;
+    *(uintptr_t*)(local+OFF_M_PWEAPONSERVICES) = localWs;
+    *(uint32_t*)(weapon+R_OWNER) = 0xffffffffu;
+    g_remoteCount = 0; cache->lastSeen = 0;
+    g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    Check(FindWeaponBinding(client,saved.handle,weapon) != 0,37);
+    *(uint32_t*)(weapon+R_OWNER) = 0x8065;
+    *(uint32_t*)(localWs+OFF_M_HACTIVEWEAPON) = saved.handle;
+    g_skin_count = 1; g_skins[0].def = 9; g_skins[0].cfg = saved.cfg; g_skins[0].cfg.paint = 344;
+    ApplyLocalSkins(client);
+    Check(*(int*)(weapon+OFF_M_FALLBACKPAINTKIT) == 756 && RemoteAttr(item,7,-1) == 7,38);
+    Check(FindWeaponBinding(client,saved.handle,weapon)->donor == saved.player,39);
+    beforeRepair = updateCalls;
+    ApplyLocalSkins(client);
+    Check(updateCalls == beforeRepair,40);
+
+    // A distinct local gun gets the local paint, then keeps it for a remote holder.
+    uintptr_t donated = Allocate(12000), donatedNode = Allocate(4096);
+    *(uintptr_t*)(chunk+0x70*202) = donated;
+    *(uintptr_t*)(donated+OFF_M_PGAMESCENENODE) = donatedNode;
+    *(uint32_t*)(donated+R_OWNER) = 0x8065;
+    *(uint16_t*)(RemoteItem(donated,0)+OFF_M_ITEMDEFINDEX) = 9;
+    *(uint32_t*)(localWs+OFF_M_HACTIVEWEAPON) = 0x80ca;
+    ApplyLocalSkins(client);
+    Check(*(int*)(donated+OFF_M_FALLBACKPAINTKIT) == 344,41);
+    *(uint32_t*)(donated+R_OWNER) = 0x8064;
+    *(uint32_t*)(ws+OFF_M_HACTIVEWEAPON) = 0x80ca;
+    g_remote[0] = saved; g_remote[0].handle = 0x80ca; g_remoteCount = 1;
+    g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    Check(*(int*)(donated+OFF_M_FALLBACKPAINTKIT) == 344,42);
+    // New full handle, same memory and slot: cannot inherit an old donor.
+    Check(!FindWeaponBinding(client,0x100ca,donated),43);
+
+    // Local butterfly seed 400 repairs lost attributes and resets on respawn.
+    *(uint32_t*)(localWs+OFF_M_HACTIVEWEAPON) = 0x100ca;
+    *(uint32_t*)(donated+R_OWNER) = 0x8065;
+    uintptr_t donatedItem = RemoteItem(donated,0);
+    *(uint16_t*)(donatedItem+OFF_M_ITEMDEFINDEX) = 42;
+    g_skins[0].def = 515; g_skins[0].cfg = saved.cfg;
+    g_skins[0].cfg.seed = 400; g_skins[0].cfg.paint = 568;
+    copy_str(g_skins[0].cfg.model,"weapons/models/knife/knife_butterfly/weapon_knife_butterfly.vmdl",320);
+    ApplyLocalSkins(client);
+    Check(RemoteAttr(donatedItem,7,-1) == 400 && *(uint16_t*)(donatedItem+OFF_M_ITEMDEFINDEX) == 515,44);
+    *(int*)(donatedItem+528) = 0; // all material attributes disappear
+    g_localSkin.lastApply = GetTickCount64()-1000;
+    ApplyLocalSkins(client);
+    Check(RemoteAttr(donatedItem,7,-1) == 400 && RemoteAttr(donatedItem,6,-1) == 568,45);
+    *(int*)(donated+OFF_M_FALLBACKSEED) = 0;
+    beforeRepair = updateCalls; ApplyLocalSkins(client);
+    Check(*(int*)(donated+OFF_M_FALLBACKSEED) == 400 && updateCalls == beforeRepair,46);
+    // Pawn serial changed at the same address: forces a fresh presentation.
+    *(uint32_t*)(localController+R_PLAYERPAWN) = 0x10065;
+    *(uint32_t*)(donated+R_OWNER) = 0x10065;
+    ApplyLocalSkins(client);
+    Check(updateCalls == beforeRepair+1 && RemoteAttr(donatedItem,7,-1) == 400,47);
+    // One spawn-settle rebuild, then stable again (no recurring timer).
+    g_localSkin.settleAt = GetTickCount64()-1; g_localSkin.lastApply = GetTickCount64()-1000;
+    ApplyLocalSkins(client);
+    Check(updateCalls == beforeRepair+2 && !g_localSkin.settleAt,48);
+    ApplyLocalSkins(client); Check(updateCalls == beforeRepair+2,49);
+    // Current ownership is mandatory even when an active handle is stale.
+    *(uint32_t*)(donated+R_OWNER) = 0x8064;
+    beforeRepair = updateCalls; ApplyLocalSkins(client);
+    Check(updateCalls == beforeRepair,51);
+    *(uint32_t*)(donated+R_OWNER) = 0x10065;
+    // The original donor may update its own gun after getting it back.
+    g_skins[0].cfg.seed = 401;
+    ApplyLocalSkins(client);
+    Check(RemoteAttr(donatedItem,7,-1) == 401 &&
+        FindWeaponBinding(client,0x100ca,donated)->cfg.seed == 401,52);
+    // A new identity at a reused address invalidates the old binding.
+    *(uintptr_t*)(donated+16) = Allocate(128);
+    Check(!FindWeaponBinding(client,0x100ca,donated),53);
+    ApplyLocalSkins(client);
+    // Map/session transition clears all physical-weapon bindings.
+    *(uintptr_t*)(client+OFF_DW_GAMERULES) = 234567;
+    Check(!FindWeaponBinding(client,0x100ca,donated),50);
     // Malformed/overflow input fails closed, clearing the render batch.
     const char badFile[] = "CS2PY_REMOTE_V1 18446744073709551616 0 0 0";
     Check(!RemoteParse(badFile,badFile+sizeof(badFile)-1) && g_remoteCount == 0,16);

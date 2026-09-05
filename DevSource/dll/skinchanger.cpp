@@ -655,125 +655,26 @@ static void Loop() {
         return;
     }
     DllLog("loop: client.dll base=%p", (void*)client);
-    DllLog("skin-share renderer: version=3 shared local material path; gloves disabled");
+    DllLog("skin-share renderer: version=4 physical weapon bindings; local/shared integrity checks; gloves disabled");
     ResolveFunctions();
     DllLog("loop: entering main loop, skins=%d", g_skin_count);
 
-    uintptr_t lastWeapon = 0;
-    uint16_t lastDef = 0;
-    int lastPaint = -1;
-    int lastSeed = -1;
-    int lastMesh = -1;
-    float lastWear = -1.0f;
-    char lastModel[320];
-    lastModel[0] = 0;
-    int haveLast = 0;
-    uint64_t lastPokeTick = 0;
-
+    uintptr_t lastRules = 0, lastList = 0;
     while (true) {
         ReadConfig();
-
-        // When the game rules are gone we are not in a live match (main menu,
-        // map loading/unloading). Touching entity memory during teardown was
-        // crashing cs2 (access violation) on "exit to main menu" / match end.
-        uintptr_t gameRules = *(uintptr_t*)(client + OFF_DW_GAMERULES);
-        if (!gameRules) {
-            // Discard pointers from the previous map without dereferencing them.
+        uintptr_t rules = *(uintptr_t*)(client+OFF_DW_GAMERULES);
+        uintptr_t list = *(uintptr_t*)(client+OFF_DW_ENTITY_LIST);
+        if (!rules || rules != lastRules || list != lastList) {
+            // Never dereference pointers cached from a previous map.
             memset(g_remoteCache,0,sizeof(g_remoteCache));
-            Sleep(250);
-            continue;
+            memset(&g_localSkin,0,sizeof(g_localSkin));
+            BindingSession(client);
+            lastRules = rules; lastList = list;
         }
-        uintptr_t pawn = *(uintptr_t*)(client + OFF_DW_LOCAL_PLAYER_PAWN);
-        if (!pawn || !safe_ptr(pawn)) {
-            Sleep(250);
-            continue;
+        if (rules) {
+            ApplyLocalSkins(client);
+            ApplyRemoteSkins(client);
         }
-
-        // --- active weapon / knife ---
-        uintptr_t ws = *(uintptr_t*)(pawn + OFF_M_PWEAPONSERVICES);
-        if (ws && safe_ptr(ws)) {
-            uint32_t handle = *(uint32_t*)(ws + OFF_M_HACTIVEWEAPON);
-            uintptr_t weapon = ResolveEntity(client, handle);
-            if (weapon && safe_ptr(weapon)) {
-                uintptr_t itemView = weapon + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM;
-                uint16_t def = *(uint16_t*)(itemView + OFF_M_ITEMDEFINDEX);
-                const int isKnife = is_knife_def(def);
-
-                AcquireSRWLockShared(&g_lock);
-                const SkinCfg* pick = 0;
-                uint16_t pickDef = 0;
-                if (isKnife) {
-                    // Knives: apply the most recently configured knife (last
-                    // knife entry in the file), model-swapping as needed.
-                    for (int i = 0; i < g_skin_count; i++) {
-                        if (is_knife_def(g_skins[i].def)) {
-                            pick = &g_skins[i].cfg;
-                            pickDef = g_skins[i].def;
-                        }
-                    }
-                } else {
-                    for (int i = 0; i < g_skin_count; i++) {
-                        if (g_skins[i].def != def) continue;
-                        pick = &g_skins[i].cfg;
-                        pickDef = def;
-                        break;
-                    }
-                }
-
-                if (!pick) {
-                    haveLast = 0;
-                } else {
-                    // The expensive game functions (SetAttributeValueByName,
-                    // UpdateSkin, UpdateCompositeMaterial, SetModel,
-                    // UpdateSubclass, UpdateWeaponVm) only run when the target
-                    // actually changes. The cheap field writes (PokeFields) also
-                    // run only on change now, plus a light 2s re-poke so a rare
-                    // game-side reset still gets corrected without hammering the
-                    // entity every frame (which caused input hitches).
-                    int changed = !haveLast
-                        || weapon != lastWeapon
-                        || pickDef != lastDef
-                        || pick->paint != lastPaint
-                        || pick->seed != lastSeed
-                        || pick->wear != lastWear
-                        || pick->meshMask != lastMesh
-                        || !str_eq(pick->model, lastModel);
-                    uint64_t now = GetTickCount64();
-
-                    if (changed) {
-                        DllLog("apply: def=%u paint=%d seed=%d wear=%.3f mesh=%d model=%s weapon=%p",
-                            (unsigned)def, pick->paint, pick->seed, pick->wear, pick->meshMask, pick->model, (void*)weapon);
-                        ApplySkin(weapon, pick, pickDef);
-                        ApplyViewmodelMask(client, pawn, pick->meshMask);
-                        if (isKnife && pick->model[0] && g_setModel) {
-                            // Full knife swap: world weapon model + the
-                            // first-person viewmodel(s) + subclass id. The
-                            // viewmodel model write is what was missing before
-                            // and caused UpdateWeaponViewModel to corrupt state.
-                            ApplyKnifePresentation(client,pawn,weapon,pick,pickDef);
-                            // Subclass id = murmur2(decimal def index) drives
-                            // the knife animation class (butterfly flip).
-                        }
-                        lastWeapon = weapon;
-                        lastDef = pickDef;
-                        lastPaint = pick->paint;
-                        lastSeed = pick->seed;
-                        lastWear = pick->wear;
-                        lastMesh = pick->meshMask;
-                        copy_str(lastModel, pick->model, (int)sizeof(lastModel));
-                        haveLast = 1;
-                        lastPokeTick = now;
-                    } else if (now - lastPokeTick >= 2000) {
-                        PokeFields(weapon, pick, pickDef);
-                        lastPokeTick = now;
-                    }
-                }
-                ReleaseSRWLockShared(&g_lock);
-            }
-        }
-
-        ApplyRemoteSkins(client);
-
         Sleep(250);
     }
 }

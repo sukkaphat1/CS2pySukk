@@ -20,7 +20,7 @@ Logs are in the Windows user profile:
 
 - cs2py_skinshare_debug.log: `mapped player=... slot=... def=... paint_kit=...`
   confirms a fresh relay selection was mapped to receiver-local equipment.
-- cs2py_dll.log: `skin-share renderer: version=3` confirms the new DLL loaded;
+- cs2py_dll.log: `skin-share renderer: version=4` confirms the new DLL loaded;
   `remote apply: player=... slot=... kind=... def=... paint=...` confirms the
   native identity checks passed and the apply functions were called.
 - `received selection` includes the receiver's paint/mesh lookup;
@@ -68,6 +68,50 @@ The renderer does not modify another person's computer or the game server.
 - The relay's shared token does not verify ownership of a claimed SteamID.
   Entity matching prevents accidental cross-player application, but authenticated
   Steam identity would be needed before trusting arbitrary third-party clients.
+
+## Version 4: weapon transfers and integrity checks
+
+- After a verified local/shared application, the receiver remembers that physical
+  weapon's paint, seed, wear, mesh and knife model. A different holder's loadout
+  cannot replace it. The original selecting player can update it when holding it
+  again. This works in both directions; a different AWP still uses its own skin.
+- Bindings use receiver-local full handles, entity/identity pointers and original
+  owner XUID, and are discarded on an observed map/entity-list transition or slot
+  serial change. Before applying, the current owner's controller/pawn relationship,
+  full active handle, owner handle, health and non-dormant scene are checked again.
+  Cached ground-weapon pointers are never used to write while a gun is dropped.
+- Both testers must have observed the donor's shared weapon before it was dropped.
+  This is per-client, in-match memory, not persistent inventory or a relay item
+  history. A late joiner/restarted client cannot recover an unseen gun's old skin.
+  The bounded cache holds up to 256 observed weapons and does not evict live ones.
+- Previously observed donor bindings survive a temporary relay gap in the same
+  match; no new peer updates are applied from an expired bridge. Restarting CS2
+  clears the history. No Worker/protocol update is required for this version.
+- Local and remote attribute integrity is checked every 250 ms (previously the
+  remote attribute check waited two seconds; local only re-poked fallback fields).
+  Missing paint/seed/wear attributes count as incorrect, even if fallback fields
+  are correct. Heavy reset repairs have a 750 ms cooldown; the remote batch still
+  has a four-target budget. Selection/context changes are applied promptly.
+- Fallback fields and mesh-only resets use lightweight repairs. Pawn/full-handle,
+  scene and attachment changes force presentation refreshes. Local respawns also
+  get one delayed settle refresh, not a permanent material-refresh timer.
+- The checks inspect item/material inputs, not rendered pixels. A blank texture
+  with all inspected state correct cannot be detected reliably by these checks.
+  Rendering, knife animations and gameplay performance still need live testing.
+
+Restart **CS2 and the tool on both PCs** before testing (restarting only the Python
+tool can leave the previous injected DLL loaded). Confirm `version=4` in the log.
+
+1. Choose different AWP paints, let each player hold theirs for three seconds,
+   then drop and exchange them. Each gun should retain its donor's paint. Switch
+   away/back, drop it again and return it. Also test a separately bought AWP.
+2. Repeat with USP-S Printstream and inspect both first- and third-person views.
+   Move, switch weapons, and check whether any blank or flashing material returns.
+3. Select Butterfly Gamma Doppler with seed 400. Die/respawn several times, then
+   inspect after one second. Confirm paint **and seed 400**, not only knife model.
+4. If it fails, collect both DLL and skin-share logs with the exact gun, paint,
+   seed, pickup/respawn event and viewing perspective. `local apply` reports
+   `inherited=1` for a remembered donor gun and the refresh reason.
 
 ## Automated checks
 

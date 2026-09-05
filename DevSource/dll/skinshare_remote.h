@@ -25,12 +25,14 @@ struct RemoteOriginal {
 };
 struct RemoteCache {
     int valid, wanted;
-    uintptr_t pawn, entity;
+    uintptr_t pawn, entity, identity;
     RemoteEntry entry;
     RemoteOriginal original;
     uint64_t lastApply;
     uint64_t lastSeen;
     uintptr_t scene;
+    uint32_t hudHandle;
+    uintptr_t attachment;
 };
 static RemoteEntry g_remote[128];
 static const int REMOTE_CACHE_CAPACITY = 256;
@@ -212,6 +214,94 @@ static float RemoteAttr(uintptr_t item, uint16_t def, float fallback) {
         if (*(uint16_t*)(data+i*72+48) == def) return *(float*)(data+i*72+52);
     return fallback;
 }
+
+// Missing attributes are NOT equivalent to correct fallback fields. Both local
+// and shared weapons use this check; -1 cannot be a valid paint/seed/wear.
+static int SkinAttributesWrong(uintptr_t entity, const SkinCfg* cfg) {
+    uintptr_t item = RemoteItem(entity,0);
+    return RemoteAttr(item,6,-1) != (float)cfg->paint ||
+        RemoteAttr(item,7,-1) != (float)cfg->seed || RemoteAttr(item,8,-1) != cfg->wear;
+}
+static void RepairSkinFields(uintptr_t entity, const SkinCfg* cfg, uint16_t def) {
+    uintptr_t item = RemoteItem(entity,0);
+    if (*(uint16_t*)(item+OFF_M_ITEMDEFINDEX) != def ||
+        *(uint64_t*)(item+OFF_M_ITEMID) != 0xffffffff00000000ULL ||
+        *(uint32_t*)(item+OFF_M_ITEMIDHIGH) != 0xffffffffu ||
+        *(uint8_t*)(item+OFF_M_BINITIALIZED) != 1 ||
+        *(uint8_t*)(item+OFF_M_BDISALLOWSOC) != 1 ||
+        *(uint8_t*)(item+OFF_M_BRESTORECUSTOM) != 1 ||
+        *(int*)(entity+OFF_M_FALLBACKPAINTKIT) != cfg->paint ||
+        *(int*)(entity+OFF_M_FALLBACKSEED) != cfg->seed ||
+        *(float*)(entity+OFF_M_FALLBACKWEAR) != cfg->wear)
+        PokeFields(entity,cfg,def,true);
+}
+static int KnifePresentationWrong(uintptr_t entity, const SkinCfg* cfg, uint16_t def) {
+    if (!is_knife_def(def)) return 0;
+    if (*(uint32_t*)(entity+896) != MakeSubclassToken(def)) return 1;
+    uintptr_t scene = RemoteScene(entity);
+    uintptr_t name = scene ? *(uintptr_t*)(scene+OFF_M_MODELSTATE+168) : 0;
+    return remote_readable(name,320) && !str_eq((const char*)name,cfg->model);
+}
+
+// Bind cosmetics to an observed physical weapon, not its current holder's
+// loadout. No writes are made through these cached pointers: callers must first
+// verify the CURRENT pawn/owner and its full (including serial) active handle.
+// Thus a dropped gun can be remembered without trusting an index-only resolver
+// to write to it on the ground. A recycled slot with a new handle cannot inherit.
+struct WeaponBinding {
+    int valid;
+    uint32_t handle;
+    uintptr_t entity, identity;
+    uint64_t ownerXuid, donor;
+    uint16_t target;
+    SkinCfg cfg;
+};
+static WeaponBinding g_bindings[256];
+static uintptr_t g_bindingRules = 0, g_bindingList = 0;
+static void BindingSession(uintptr_t client) {
+    uintptr_t rules = *(uintptr_t*)(client+OFF_DW_GAMERULES);
+    uintptr_t list = *(uintptr_t*)(client+OFF_DW_ENTITY_LIST);
+    if (!rules || rules != g_bindingRules || list != g_bindingList) {
+        memset(g_bindings,0,sizeof(g_bindings));
+        g_bindingRules = rules; g_bindingList = list;
+    }
+}
+static int BindingAlive(uintptr_t client, WeaponBinding* b) {
+    if (!b->valid) return 0;
+    uintptr_t entity = ResolveEntity(client,b->handle);
+    if (entity != b->entity || !remote_readable(entity,5820) ||
+        *(uintptr_t*)(entity+16) != b->identity || // CEntityInstance::m_pEntity
+        *(uint64_t*)(entity+OFF_M_OWNERXUIDLOW) != b->ownerXuid) {
+        b->valid = 0; return 0;
+    }
+    return 1;
+}
+static WeaponBinding* FindWeaponBinding(uintptr_t client, uint32_t handle, uintptr_t entity) {
+    BindingSession(client);
+    for (int i = 0; i < 256; i++) {
+        WeaponBinding* b = &g_bindings[i];
+        if (!b->valid) continue;
+        // An observed serial change is definitive even if the allocator reused
+        // both the entity and its identity address between our samples.
+        if ((b->handle & 0x7fff) == (handle & 0x7fff) && b->handle != handle) b->valid = 0;
+        if (b->handle == handle && BindingAlive(client,b) && b->entity == entity) return b;
+    }
+    return 0;
+}
+static void RememberWeaponSkin(uintptr_t client, uint32_t handle, uintptr_t entity,
+                               uint64_t player, uint16_t target, const SkinCfg* cfg) {
+    WeaponBinding* b = FindWeaponBinding(client,handle,entity);
+    if (b && b->donor != player) return; // pickup never overwrites the donor selection
+    if (!b) {
+        for (int i = 0; i < 256; i++)
+            if (!BindingAlive(client,&g_bindings[i])) { b = &g_bindings[i]; break; }
+    }
+    if (!b) return; // bounded cache; never evict another live weapon
+    b->valid = 1; b->handle = handle; b->entity = entity;
+    b->identity = *(uintptr_t*)(entity+16);
+    b->ownerXuid = *(uint64_t*)(entity+OFF_M_OWNERXUIDLOW);
+    b->donor = player; b->target = target; b->cfg = *cfg;
+}
 static void RemoteCapture(RemoteCache* c) {
     uintptr_t item = RemoteItem(c->entity,c->entry.kind);
     RemoteOriginal* o = &c->original;
@@ -249,7 +339,7 @@ static void RemoteRefresh(uintptr_t entity, uintptr_t item, const SkinCfg* cfg, 
 static void RemoteRestore(uintptr_t client, RemoteCache* c) {
     uintptr_t pawn, entity;
     if (c->valid && RemoteResolve(client,&c->entry,&pawn,&entity,0) &&
-        pawn == c->pawn && entity == c->entity && g_setAttr) {
+        pawn == c->pawn && entity == c->entity && *(uintptr_t*)(entity+16) == c->identity && g_setAttr) {
         uintptr_t item = RemoteItem(entity,c->entry.kind);
         RemoteOriginal* o = &c->original;
         *(uint16_t*)(item+OFF_M_ITEMDEFINDEX) = o->def;
@@ -293,6 +383,92 @@ static RemoteCache* RemoteCacheFor(const RemoteEntry* r) {
     }
     return freeSlot;
 }
+struct LocalSkinState {
+    int valid;
+    uintptr_t pawn, entity, identity, scene, attachment, rules;
+    uint32_t handle, pawnHandle, hudHandle;
+    uint16_t target;
+    SkinCfg cfg;
+    uint64_t lastApply, settleAt;
+};
+static LocalSkinState g_localSkin;
+
+static void ApplyLocalSkins(uintptr_t client) {
+    BindingSession(client);
+    uintptr_t rules = *(uintptr_t*)(client+OFF_DW_GAMERULES);
+    uintptr_t pawn = *(uintptr_t*)(client+OFF_DW_LOCAL_PLAYER_PAWN);
+    if (!rules || !remote_readable(pawn,OFF_M_HHUDMODELARMS+4) || *(int*)(pawn+R_HEALTH) <= 0) {
+        g_localSkin.valid = 0; return;
+    }
+    uintptr_t controller = ResolveEntity(client,*(uint32_t*)(pawn+R_CONTROLLER));
+    if (!remote_readable(controller,R_PLAYERPAWN+4)) { g_localSkin.valid = 0; return; }
+    uint64_t player = *(uint64_t*)(controller+R_STEAMID);
+    uint32_t pawnHandle = *(uint32_t*)(controller+R_PLAYERPAWN);
+    uintptr_t ws = *(uintptr_t*)(pawn+OFF_M_PWEAPONSERVICES);
+    if (!player || ResolveEntity(client,pawnHandle) != pawn || !remote_readable(ws,OFF_M_HACTIVEWEAPON+4)) {
+        g_localSkin.valid = 0; return;
+    }
+    uint32_t handle = *(uint32_t*)(ws+OFF_M_HACTIVEWEAPON);
+    uintptr_t entity = ResolveEntity(client,handle);
+    if (!remote_readable(entity,5820) || *(uint32_t*)(entity+R_OWNER) != pawnHandle) {
+        g_localSkin.valid = 0; return;
+    }
+    uintptr_t scene = RemoteScene(entity);
+    if (!scene || *(uint8_t*)(scene+259)) { g_localSkin.valid = 0; return; }
+    uint16_t def = *(uint16_t*)(RemoteItem(entity,0)+OFF_M_ITEMDEFINDEX);
+    SkinCfg selected = {}; uint16_t target = 0;
+    AcquireSRWLockShared(&g_lock);
+    for (int i = 0; i < g_skin_count; i++) {
+        if ((is_knife_def(def) && is_knife_def(g_skins[i].def)) || g_skins[i].def == def) {
+            selected = g_skins[i].cfg; target = g_skins[i].def;
+            if (!is_knife_def(def)) break;
+        }
+    }
+    ReleaseSRWLockShared(&g_lock);
+    WeaponBinding* binding = FindWeaponBinding(client,handle,entity);
+    int inherited = binding && binding->donor != player &&
+        (binding->target == def || (is_knife_def(binding->target) && is_knife_def(def)));
+    if (inherited) { selected = binding->cfg; target = binding->target; }
+    if (!target || is_glove_def(target) || !g_setAttr || !g_updateSkin || !g_setMask ||
+        (is_knife_def(target) && (!g_setModel || !g_updateSubclass || !g_updateWeaponVm))) {
+        g_localSkin.valid = 0; return;
+    }
+    const SkinCfg* cfg = &selected;
+    LocalSkinState* c = &g_localSkin;
+    uint32_t hudHandle = *(uint32_t*)(pawn+OFF_M_HHUDMODELARMS);
+    uintptr_t attachment = RemoteAttachment(client,pawn,entity);
+    int respawn = !c->valid || c->rules != rules || c->pawn != pawn || c->pawnHandle != pawnHandle;
+    int selection = respawn || c->entity != entity || c->identity != *(uintptr_t*)(entity+16) ||
+        c->handle != handle || c->target != target ||
+        c->cfg.paint != cfg->paint || c->cfg.seed != cfg->seed || c->cfg.wear != cfg->wear ||
+        c->cfg.meshMask != cfg->meshMask || !str_eq(c->cfg.model,cfg->model);
+    int recreated = c->scene != scene || c->hudHandle != hudHandle || c->attachment != attachment;
+    uint64_t tick = GetTickCount64();
+    RepairSkinFields(entity,cfg,target);
+    int wrong = SkinAttributesWrong(entity,cfg) || KnifePresentationWrong(entity,cfg,target);
+    int settling = c->settleAt && tick >= c->settleAt;
+    if (selection || recreated || ((wrong || settling) && tick-c->lastApply >= 750)) {
+        PokeFields(entity,cfg,target,true); // preserve the real original-owner XUID
+        RefreshWeaponMaterials(entity,cfg);
+        ApplyKnifePresentation(client,pawn,entity,cfg,target);
+        c->lastApply = tick;
+        // One delayed rebuild after a new pawn, not a recurring refresh timer.
+        // This lets late spawn initialization finish before committing materials.
+        if (respawn) c->settleAt = tick+750;
+        else if (settling) c->settleAt = 0;
+        DllLog("local apply: def=%u paint=%d seed=%d inherited=%d reason=%s",
+            (unsigned)target,cfg->paint,cfg->seed,inherited,
+            respawn ? "pawn_ready" : selection ? "selection" : recreated ? "scene_replaced" : settling ? "spawn_settle" : "state_reset");
+    }
+    RemoteVisualMeshes(client,pawn,entity,cfg->meshMask);
+    c->valid = 1; c->rules = rules; c->pawn = pawn; c->pawnHandle = pawnHandle;
+    c->entity = entity; c->handle = handle; c->target = target; c->cfg = *cfg;
+    c->identity = *(uintptr_t*)(entity+16);
+    c->scene = RemoteScene(entity); c->hudHandle = hudHandle;
+    c->attachment = RemoteAttachment(client,pawn,entity);
+    RememberWeaponSkin(client,handle,entity,player,target,cfg);
+}
+
 static void ApplyRemoteSkins(uintptr_t client) {
     ReadRemoteConfig();
     uint64_t now = remote_now_ms();
@@ -311,7 +487,8 @@ static void ApplyRemoteSkins(uintptr_t client) {
     for (int i = 0; i < REMOTE_CACHE_CAPACITY; i++) g_remoteCache[i].wanted = 0;
     int budget = 4;
     for (int i = 0; i < count; i++) {
-        RemoteEntry* r = &g_remote[i];
+        RemoteEntry effective = g_remote[i];
+        RemoteEntry* r = &effective;
         if (r->kind || is_glove_def(r->target)) continue;
         RemoteCache* c = RemoteCacheFor(r);
         if (!c) continue;
@@ -319,7 +496,7 @@ static void ApplyRemoteSkins(uintptr_t client) {
         uint64_t tick = GetTickCount64();
         // A current instruction can temporarily fail the active/dormancy
         // checks. Keep the baseline, without writing through a failed check.
-        if (c->valid && RemoteSame(&c->entry,r)) { c->wanted = 1; c->lastSeen = tick; }
+        if (c->valid) { c->wanted = 1; c->lastSeen = tick; }
         uintptr_t pawn, entity;
         if (!RemoteResolve(client,r,&pawn,&entity,1)) {
             if (!g_remoteLastReject[cacheIndex] || !str_eq(g_remoteLastReject[cacheIndex],g_remoteReject)) {
@@ -330,30 +507,32 @@ static void ApplyRemoteSkins(uintptr_t client) {
             continue;
         }
         g_remoteLastReject[cacheIndex] = 0;
+        WeaponBinding* binding = FindWeaponBinding(client,r->handle,entity);
+        if (binding && binding->donor != r->player &&
+            (binding->target == r->target || (is_knife_def(binding->target) && is_knife_def(r->target)))) {
+            r->target = binding->target; r->cfg = binding->cfg;
+        }
         c->wanted = 1;
         c->lastSeen = tick;
         uintptr_t item = RemoteItem(entity,r->kind);
         uintptr_t scene = r->kind ? 0 : RemoteScene(entity);
-        int selectionChanged = !c->valid || c->pawn != pawn || c->entity != entity || !RemoteSame(&c->entry,r);
-        int recreated = c->valid && !r->kind && c->scene != scene;
+        int selectionChanged = !c->valid || c->pawn != pawn || c->entity != entity ||
+            c->identity != *(uintptr_t*)(entity+16) || !RemoteSame(&c->entry,r);
+        uint32_t hudHandle = *(uint32_t*)(pawn+OFF_M_HHUDMODELARMS);
+        uintptr_t attachment = RemoteAttachment(client,pawn,entity);
+        int recreated = c->valid && (c->scene != scene || c->hudHandle != hudHandle || c->attachment != attachment);
         int changed = selectionChanged || recreated;
         if (!changed) {
-            // Resist network field resets cheaply, without destroying and
-            // rebuilding otherwise-correct materials during movement.
-            if (*(uint16_t*)(item+OFF_M_ITEMDEFINDEX) != r->target ||
-                *(uint32_t*)(item+OFF_M_ITEMIDHIGH) != 0xffffffffu ||
-                *(uint8_t*)(item+OFF_M_BINITIALIZED) != 1 ||
-                *(int*)(entity+OFF_M_FALLBACKPAINTKIT) != r->cfg.paint ||
-                *(int*)(entity+OFF_M_FALLBACKSEED) != r->cfg.seed ||
-                *(float*)(entity+OFF_M_FALLBACKWEAR) != r->cfg.wear)
-                PokeFields(entity,&r->cfg,r->target,true);
+            RepairSkinFields(entity,&r->cfg,r->target);
         }
-        if (!changed && tick-c->lastApply >= 2000) {
-            changed = RemoteAttr(item,6,(float)r->cfg.paint) != (float)r->cfg.paint ||
-                RemoteAttr(item,7,(float)r->cfg.seed) != (float)r->cfg.seed ||
-                RemoteAttr(item,8,r->cfg.wear) != r->cfg.wear;
+        // Inspect every pass, but rate-limit expensive repairs independently.
+        int attributesWrong = SkinAttributesWrong(entity,&r->cfg);
+        int presentationWrong = KnifePresentationWrong(entity,&r->cfg,r->target);
+        if (!changed && tick-c->lastApply >= 750) {
+            changed = attributesWrong || presentationWrong;
         }
         if (!changed) {
+            RememberWeaponSkin(client,r->handle,entity,r->player,r->target,&r->cfg);
             if (budget > 0 && RemoteVisualMeshes(client,pawn,entity,r->cfg.meshMask)) {
                 budget--;
             }
@@ -361,11 +540,12 @@ static void ApplyRemoteSkins(uintptr_t client) {
         }
         if (budget <= 0) continue;
         budget--;
-        if (c->valid && (c->pawn != pawn || c->entity != entity ||
+        if (c->valid && (c->pawn != pawn || c->entity != entity || c->identity != *(uintptr_t*)(entity+16) ||
             c->entry.player != r->player || c->entry.pawn != r->pawn || c->entry.handle != r->handle))
             RemoteRestore(client,c);
         if (!c->valid) {
             c->pawn = pawn; c->entity = entity; c->entry = *r;
+            c->identity = *(uintptr_t*)(entity+16);
             RemoteCapture(c);
         }
         c->entry = *r;
@@ -373,13 +553,15 @@ static void ApplyRemoteSkins(uintptr_t client) {
         RemoteRefresh(entity,item,&r->cfg,r->kind);
         // Preserve the working local ordering: materials first, then knife
         // model + HUD model + subclass + attachment/viewmodel refresh.
-        if (is_knife_def(r->target) && (selectionChanged || recreated ||
-            *(uint32_t*)(entity+896) != MakeSubclassToken(r->target)))
+        if (is_knife_def(r->target) && (selectionChanged || recreated || presentationWrong))
             ApplyKnifePresentation(client,pawn,entity,&r->cfg,r->target);
         RemoteVisualMeshes(client,pawn,entity,r->cfg.meshMask);
         c->valid = 1;
         c->scene = r->kind ? 0 : RemoteScene(entity);
+        c->hudHandle = hudHandle;
+        c->attachment = RemoteAttachment(client,pawn,entity);
         c->lastApply = tick;
+        RememberWeaponSkin(client,r->handle,entity,r->player,r->target,&r->cfg);
         char playerText[21]; RemotePlayerString(r->player,playerText);
         DllLog("remote apply: player=%s slot=%u def=%u paint=%d mesh=%d reason=%s entity=%p",
             playerText,r->slot,(unsigned)r->target,r->cfg.paint,r->cfg.meshMask,
