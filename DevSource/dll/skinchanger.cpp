@@ -750,7 +750,7 @@ static void Loop() {
         return;
     }
     DllLog("loop: client.dll base=%p", (void*)client);
-    DllLog("skin-share renderer: version=1 SteamID ownership mapping enabled");
+    DllLog("skin-share renderer: version=2 material settling and mesh recovery enabled");
     ResolveFunctions();
     DllLog("loop: entering main loop, skins=%d", g_skin_count);
 

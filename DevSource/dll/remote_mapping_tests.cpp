@@ -4,9 +4,16 @@
 
 static int attrCalls = 0, updateCalls = 0, modelCalls = 0;
 static void __fastcall FakeAttr(void*,const char*,float) { attrCalls++; }
-static void __fastcall FakeUpdate(void*,bool) { updateCalls++; }
+static void __fastcall FakeUpdate(void* entity,bool) {
+    updateCalls++;
+    // Reproduce a material refresh resetting the visible mesh.
+    uintptr_t node = *(uintptr_t*)((uintptr_t)entity+OFF_M_PGAMESCENENODE);
+    if (node) *(uint64_t*)(node+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) = 0;
+}
 static void __fastcall FakeModel(void*,const char*) { modelCalls++; }
-static void __fastcall FakeMask(void*,uint64_t) {}
+static void __fastcall FakeMask(void* node,uint64_t mesh) {
+    *(uint64_t*)((uintptr_t)node+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) = mesh;
+}
 static uintptr_t Allocate(SIZE_T size) {
     uintptr_t result = (uintptr_t)VirtualAlloc(0,size,MEM_COMMIT | MEM_RESERVE,PAGE_READWRITE);
     if (!result) ExitProcess(99);
@@ -72,8 +79,45 @@ extern "C" void RemoteTestMain() {
     Check(*(uint32_t*)(weapon+OFF_M_OWNERXUIDLOW) == 123 && *(uint32_t*)(weapon+OFF_M_OWNERXUIDHIGH) == 456,11);
     g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
     Check(attrCalls == 3 && updateCalls == 1,12); // unchanged: no expensive calls
+    Check(*(uint64_t*)(node+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) == 2,19);
+    // A mesh-only reset is repaired without rebuilding all materials.
+    *(uint64_t*)(node+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) = 1;
+    g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    Check(*(uint64_t*)(node+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) == 2 && updateCalls == 1,20);
+    // Exactly two scheduled material follow-ups, then stop while unchanged.
+    RemoteCache* cache = &g_remoteCache[126];
+    cache->nextSettle = 0;
+    g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    Check(updateCalls == 2 && cache->settleRemaining == 1,21);
+    cache->nextSettle = 0;
+    g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    Check(updateCalls == 3 && cache->settleRemaining == 0,22);
+    cache->nextSettle = 0;
+    g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    Check(updateCalls == 3,23);
+    // Recreated scene node triggers fresh material work and mesh restoration.
+    uintptr_t replacementNode = Allocate(4096);
+    *(uintptr_t*)(weapon+OFF_M_PGAMESCENENODE) = replacementNode;
+    g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    Check(updateCalls == 4 && *(uint64_t*)(replacementNode+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) == 2,24);
+    node = replacementNode;
+    // AWP Printstream uses the new mesh; switching from a legacy paint must
+    // finish on mesh 1 even when UpdateSkin clears it during rebuilding.
+    g_remote[0].cfg.paint = 1206; g_remote[0].cfg.meshMask = 1;
+    g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    Check(*(int*)(weapon+OFF_M_FALLBACKPAINTKIT) == 1206 &&
+          *(uint64_t*)(node+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) == 1,25);
+    int beforeGap = updateCalls;
+    g_remoteCount = 0; g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    Check(*(int*)(weapon+OFF_M_FALLBACKPAINTKIT) == 1206 && updateCalls == beforeGap,26);
+    g_remoteCount = 1;
+    *(uint8_t*)(node+259) = 1; // dormant keeps the baseline but performs no writes
+    g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    Check(updateCalls == beforeGap && cache->valid,27);
+    *(uint8_t*)(node+259) = 0;
+    int beforeExpiry = attrCalls;
     g_remoteDeadline = 0; g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
-    Check(*(int*)(weapon+OFF_M_FALLBACKPAINTKIT) == 51 && attrCalls == 6,13);
+    Check(*(int*)(weapon+OFF_M_FALLBACKPAINTKIT) == 51 && attrCalls == beforeExpiry+3,13);
     // Default knife -> butterfly uses the world weapon model, then restores.
     uintptr_t originalModel = Allocate(4096);
     copy_str((char*)originalModel,"weapons/models/knife/knife_default_ct.vmdl",320);

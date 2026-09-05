@@ -29,6 +29,9 @@ struct RemoteCache {
     RemoteEntry entry;
     RemoteOriginal original;
     uint64_t lastApply;
+    uint64_t lastSeen, nextSettle;
+    int settleRemaining;
+    uintptr_t scene;
 };
 static RemoteEntry g_remote[128];
 static RemoteCache g_remoteCache[128];
@@ -36,6 +39,8 @@ static int g_remoteCount = 0;
 static uint64_t g_remoteDeadline = 0, g_remoteRules = 0, g_remoteLocal = 0;
 static char g_remoteFile[131072], g_remotePath[MAX_PATH];
 static uint64_t g_remoteReadTick = 0;
+static const char* g_remoteReject = "unknown";
+static const char* g_remoteLastReject[128];
 static void RemotePlayerString(uint64_t value, char* output) {
     char reversed[21]; int n = 0;
     do { reversed[n++] = (char)('0'+value%10); value /= 10; } while (value);
@@ -123,32 +128,53 @@ static void ReadRemoteConfig() {
 // Re-resolve all identities on EVERY use. Never resolve a peer's raw address.
 static int RemoteResolve(uintptr_t client, const RemoteEntry* r, uintptr_t* pawnOut,
                          uintptr_t* entityOut, int activeRequired) {
+    g_remoteReject = "controller_or_steamid";
     uintptr_t controller = ResolveEntity(client,r->slot);
     if (!remote_readable(controller,R_PLAYERPAWN+4) ||
         *(uint64_t*)(controller+R_STEAMID) != r->player ||
         *(uint32_t*)(controller+R_PLAYERPAWN) != r->pawn) return 0;
     uintptr_t pawn = ResolveEntity(client,r->pawn);
+    g_remoteReject = "pawn_identity";
     if (!remote_readable(pawn,R_GLOVES+1200) ||
         pawn == *(uintptr_t*)(client+OFF_DW_LOCAL_PLAYER_PAWN) ||
         ResolveEntity(client,*(uint32_t*)(pawn+R_CONTROLLER)) != controller) return 0;
+    g_remoteReject = "player_dead";
     if (activeRequired && *(int*)(pawn+R_HEALTH) <= 0) return 0;
     uintptr_t entity = pawn;
     if (!r->kind) {
         uintptr_t ws = *(uintptr_t*)(pawn+OFF_M_PWEAPONSERVICES);
+        g_remoteReject = "weapon_services";
         if (!remote_readable(ws,OFF_M_HACTIVEWEAPON+4)) return 0;
+        g_remoteReject = "weapon_switch_pending";
         if (activeRequired && *(uint32_t*)(ws+OFF_M_HACTIVEWEAPON) != r->handle) return 0;
         entity = ResolveEntity(client,r->handle);
+        g_remoteReject = "weapon_owner";
         if (!remote_readable(entity,OFF_M_FALLBACKSTATTRAK+4) ||
             *(uint32_t*)(entity+R_OWNER) != r->pawn) return 0;
         if (activeRequired) {
             uintptr_t node = *(uintptr_t*)(entity+OFF_M_PGAMESCENENODE);
+            g_remoteReject = "scene_not_ready_or_dormant";
             if (!remote_readable(node,OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK+8) ||
                 *(uint8_t*)(node+259)) return 0; // dormant / not transmitted
         }
         uint16_t def = *(uint16_t*)(entity+OFF_M_ATTRIBUTEMANAGER+OFF_M_ITEM+OFF_M_ITEMDEFINDEX);
+        g_remoteReject = "weapon_definition";
         if (activeRequired && !(def == r->target || (is_knife_def(def) && is_knife_def(r->target)))) return 0;
     }
     *pawnOut = pawn; *entityOut = entity;
+    return 1;
+}
+static uintptr_t RemoteScene(uintptr_t entity) {
+    uintptr_t node = *(uintptr_t*)(entity+OFF_M_PGAMESCENENODE);
+    return remote_readable(node,OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK+8) ? node : 0;
+}
+static int RemoteEnsureMesh(uintptr_t entity, uint64_t mesh) {
+    // Material rebuilds can replace/reset the scene node. Always reacquire it
+    // AFTER a refresh, and repair only the mesh when nothing else changed.
+    uintptr_t node = RemoteScene(entity);
+    if (!node || !g_setMask) return 0;
+    if (*(uint64_t*)(node+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) == mesh) return 0;
+    g_setMask((void*)node,mesh);
     return 1;
 }
 static uintptr_t RemoteItem(uintptr_t entity, int kind) {
@@ -230,10 +256,9 @@ static void RemoteRestore(uintptr_t client, RemoteCache* c) {
                 *(uint32_t*)(entity+896) = o->subclass;
                 if (g_updateSubclass) g_updateSubclass((void*)entity);
             }
-            uintptr_t node = *(uintptr_t*)(entity+OFF_M_PGAMESCENENODE);
-            if (safe_ptr(node) && g_setMask) g_setMask((void*)node,o->mesh);
         }
         RemoteRefresh(entity,item,&original,c->entry.kind);
+        if (!c->entry.kind) RemoteEnsureMesh(entity,o->mesh);
     }
     c->valid = 0;
 }
@@ -247,32 +272,64 @@ static void ApplyRemoteSkins(uintptr_t client) {
     ReadRemoteConfig();
     uint64_t now = remote_now_ms();
     int count = g_remoteCount;
+    int sessionValid = 1;
     if (now > g_remoteDeadline || g_remoteDeadline > now+10000 ||
-        *(uintptr_t*)(client+OFF_DW_GAMERULES) != g_remoteRules) count = 0;
+        *(uintptr_t*)(client+OFF_DW_GAMERULES) != g_remoteRules) sessionValid = 0;
     // Verify the file belongs to this local player and this live session.
     uintptr_t localPawn = *(uintptr_t*)(client+OFF_DW_LOCAL_PLAYER_PAWN);
     uintptr_t localController = remote_readable(localPawn,R_CONTROLLER+4) ?
         ResolveEntity(client,*(uint32_t*)(localPawn+R_CONTROLLER)) : 0;
     if (!remote_readable(localController,R_STEAMID+8) ||
-        *(uint64_t*)(localController+R_STEAMID) != g_remoteLocal) count = 0;
-    if (!g_setAttr || !g_updateSkin || !g_setModel || !g_setMask) count = 0;
+        *(uint64_t*)(localController+R_STEAMID) != g_remoteLocal) sessionValid = 0;
+    if (!g_setAttr || !g_updateSkin || !g_setModel || !g_setMask) sessionValid = 0;
+    if (!sessionValid) count = 0;
     for (int i = 0; i < 128; i++) g_remoteCache[i].wanted = 0;
     int budget = 4;
     for (int i = 0; i < count; i++) {
         RemoteEntry* r = &g_remote[i];
         RemoteCache* c = &g_remoteCache[(r->slot-1)*2+r->kind];
+        int cacheIndex = (r->slot-1)*2+r->kind;
+        uint64_t tick = GetTickCount64();
+        // A current instruction can temporarily fail the active/dormancy
+        // checks. Keep the baseline, without writing through a failed check.
+        if (c->valid && RemoteSame(&c->entry,r)) { c->wanted = 1; c->lastSeen = tick; }
         uintptr_t pawn, entity;
-        if (!RemoteResolve(client,r,&pawn,&entity,1)) continue;
-        c->wanted = 1;
-        uintptr_t item = RemoteItem(entity,r->kind);
-        int changed = !c->valid || c->pawn != pawn || c->entity != entity || !RemoteSame(&c->entry,r) ||
-                      *(uint16_t*)(item+OFF_M_ITEMDEFINDEX) != r->target;
-        if (!changed && !r->kind && GetTickCount64()-c->lastApply >= 2000) {
-            changed = *(int*)(entity+OFF_M_FALLBACKPAINTKIT) != r->cfg.paint ||
-                *(int*)(entity+OFF_M_FALLBACKSEED) != r->cfg.seed ||
-                *(float*)(entity+OFF_M_FALLBACKWEAR) != r->cfg.wear;
+        if (!RemoteResolve(client,r,&pawn,&entity,1)) {
+            if (!g_remoteLastReject[cacheIndex] || !str_eq(g_remoteLastReject[cacheIndex],g_remoteReject)) {
+                char playerText[21]; RemotePlayerString(r->player,playerText);
+                DllLog("remote skipped: player=%s def=%u paint=%d reason=%s",playerText,(unsigned)r->target,r->cfg.paint,g_remoteReject);
+                g_remoteLastReject[cacheIndex] = g_remoteReject;
+            }
+            continue;
         }
-        if (!changed || budget <= 0) continue;
+        g_remoteLastReject[cacheIndex] = 0;
+        c->wanted = 1;
+        c->lastSeen = tick;
+        uintptr_t item = RemoteItem(entity,r->kind);
+        uintptr_t scene = r->kind ? 0 : RemoteScene(entity);
+        int selectionChanged = !c->valid || c->pawn != pawn || c->entity != entity || !RemoteSame(&c->entry,r);
+        int recreated = c->valid && !r->kind && c->scene != scene;
+        int changed = selectionChanged || recreated;
+        int settling = !changed && c->settleRemaining > 0 && tick >= c->nextSettle;
+        if (!changed && tick-c->lastApply >= 2000) {
+            changed = *(uint16_t*)(item+OFF_M_ITEMDEFINDEX) != r->target ||
+                *(uint32_t*)(item+OFF_M_ITEMIDHIGH) != 0xffffffffu ||
+                *(uint8_t*)(item+OFF_M_BINITIALIZED) != 1;
+            if (!r->kind) changed = changed || *(int*)(entity+OFF_M_FALLBACKPAINTKIT) != r->cfg.paint ||
+                *(int*)(entity+OFF_M_FALLBACKSEED) != r->cfg.seed ||
+                *(float*)(entity+OFF_M_FALLBACKWEAR) != r->cfg.wear ||
+                RemoteAttr(item,6,(float)r->cfg.paint) != (float)r->cfg.paint ||
+                RemoteAttr(item,7,(float)r->cfg.seed) != (float)r->cfg.seed ||
+                RemoteAttr(item,8,r->cfg.wear) != r->cfg.wear;
+        }
+        if (!changed && !settling) {
+            if (!r->kind && budget > 0 && RemoteEnsureMesh(entity,(uint64_t)r->cfg.meshMask)) {
+                budget--;
+                DllLog("remote mesh repaired: slot=%u def=%u paint=%d mesh=%d",r->slot,(unsigned)r->target,r->cfg.paint,r->cfg.meshMask);
+            }
+            continue;
+        }
+        if (budget <= 0) continue;
         budget--;
         if (c->valid && (c->pawn != pawn || c->entity != entity ||
             c->entry.player != r->player || c->entry.pawn != r->pawn || c->entry.handle != r->handle))
@@ -295,23 +352,30 @@ static void ApplyRemoteSkins(uintptr_t client) {
             *(int*)(entity+OFF_M_FALLBACKSEED) = r->cfg.seed;
             *(float*)(entity+OFF_M_FALLBACKWEAR) = r->cfg.wear;
             // Preserve actual ownership/XUID fields. They are not cosmetic IDs.
-            if (is_knife_def(r->target)) {
+            if (is_knife_def(r->target) && (selectionChanged || recreated ||
+                *(uint32_t*)(entity+896) != MakeSubclassToken(r->target))) {
                 g_setModel((void*)entity,r->cfg.model);
                 *(uint32_t*)(entity+896) = MakeSubclassToken(r->target);
                 if (g_updateSubclass) g_updateSubclass((void*)entity);
             }
-            uintptr_t node = *(uintptr_t*)(entity+OFF_M_PGAMESCENENODE);
-            if (safe_ptr(node)) g_setMask((void*)node,(uint64_t)r->cfg.meshMask);
         }
         RemoteRefresh(entity,item,&r->cfg,r->kind);
+        if (!r->kind) RemoteEnsureMesh(entity,(uint64_t)r->cfg.meshMask);
         c->valid = 1;
-        c->lastApply = GetTickCount64();
+        c->scene = r->kind ? 0 : RemoteScene(entity);
+        c->lastApply = tick;
+        if (selectionChanged || recreated) c->settleRemaining = r->kind ? 0 : 2;
+        else if (settling) c->settleRemaining--;
+        c->nextSettle = tick+500;
         char playerText[21]; RemotePlayerString(r->player,playerText);
-        DllLog("remote apply: player=%s slot=%u kind=%d def=%u paint=%d entity=%p",
-            playerText,r->slot,r->kind,(unsigned)r->target,r->cfg.paint,(void*)entity);
+        DllLog("remote apply: player=%s slot=%u kind=%d def=%u paint=%d mesh=%d settle=%d entity=%p",
+            playerText,r->slot,r->kind,(unsigned)r->target,r->cfg.paint,r->cfg.meshMask,settling,(void*)entity);
     }
     for (int i = 0; i < 128 && budget > 0; i++) {
         if (g_remoteCache[i].valid && !g_remoteCache[i].wanted) {
+            // Sampling/render visibility can briefly disappear while switching.
+            // Expired files/sessions still restore immediately.
+            if (sessionValid && GetTickCount64()-g_remoteCache[i].lastSeen < 1500) continue;
             RemoteRestore(client,&g_remoteCache[i]); budget--;
         }
     }

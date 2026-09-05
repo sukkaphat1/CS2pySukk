@@ -20,9 +20,12 @@ Logs are in the Windows user profile:
 
 - cs2py_skinshare_debug.log: `mapped player=... slot=... def=... paint_kit=...`
   confirms a fresh relay selection was mapped to receiver-local equipment.
-- cs2py_dll.log: `skin-share renderer: version=1` confirms the new DLL loaded;
+- cs2py_dll.log: `skin-share renderer: version=2` confirms the new DLL loaded;
   `remote apply: player=... slot=... kind=... def=... paint=...` confirms the
   native identity checks passed and the apply functions were called.
+- `received selection` includes the receiver's paint/mesh lookup;
+  `remote skipped` identifies an ownership, visibility, or weapon-switch check
+  that delayed applying a selection.
 
 Neither log alone proves the intended model/material rendered successfully.
 The renderer does not modify another person's computer or the game server.
@@ -45,6 +48,13 @@ The renderer does not modify another person's computer or the game server.
   provided it still resolves to the same player and entity. Dropped/transferred
   entities are not written through their old owner mapping; the game's own
   refresh may be needed to remove their previous client-side appearance.
+- Version 2 reapplies the mesh after material refresh, repairs later mesh resets,
+  and allows two follow-up refreshes at 500 ms intervals after selection/scene
+  changes. Brief sampling gaps get a 1.5 second restoration grace period;
+  invalid/expired bridge sessions still stop applying immediately.
+- Regression tests cover USP-S, AWP, M4A1-S, and Desert Eagle Printstream's
+  distinct mesh settings. Retest both third-person USP-S and AWP Printstream
+  after switching from a working skin, holding each weapon for three seconds.
 - This build targets third-person equipment. Spectator first-person viewmodels
   and ragdolls do not have a separate applier. Glove refresh and knife animation
   behavior need visual validation on the installed game version.

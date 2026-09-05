@@ -495,6 +495,21 @@ class SkinShareClient:
             self._remote_states[player_id] = stored
         if not previous or sequence != previous_sequence:
             _log(f"received player={player_id} sequence={sequence}")
+        loadout = state.get("loadout", [state.get("active_weapon")])
+        previous_loadout = (previous or {}).get("loadout", [(previous or {}).get("active_weapon")])
+        if not previous or _stable_signature(loadout) != _stable_signature(previous_loadout):
+            database = items.get_database() or {}
+            for record in loadout:
+                if not isinstance(record, dict):
+                    continue
+                item_key = record.get("item_key")
+                item_key = item_key if _valid_item_key(item_key) else "invalid"
+                resolved = skinshare_apply.resolve_selection(record, database)
+                if resolved:
+                    _log(f"received selection player={player_id} item={item_key} "
+                         f"paint_kit={resolved['paint']} mesh={resolved['mesh']}")
+                else:
+                    _log(f"rejected selection player={player_id} item={item_key} reason=local_database_validation")
 
     def _worker(self):
         sock = None

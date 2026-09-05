@@ -43,6 +43,15 @@ class MappingTests(unittest.TestCase):
                 self.assertEqual(r[0]["slot"],64)
                 self.assertEqual(r[0]["pawn"],0x8064)
 
+    def test_printstream_variants_use_their_own_mesh(self):
+        for name,paint,mesh in [("weapon_usp_silencer",1142,2), ("weapon_awp",1206,1),
+                                ("weapon_m4a1_silencer",984,2), ("weapon_deagle",962,2)]:
+            with self.subTest(name=name):
+                self.state["loadout"] = [selection(name,paint)]
+                self.snapshot["players"][0]["active_def"] = DB["weapons"][name]["def_index"]
+                record = self.records()[0]
+                self.assertEqual((record["paint"],record["mesh"]),(paint,mesh))
+
     def test_invalid_identity_room_map_expiry_and_duplicate_are_skipped(self):
         cases = [("player",0), ("local",int(LOCAL)), ("duplicate",None),
                  ("match","bad"), ("map","bad"), ("time",90)]
