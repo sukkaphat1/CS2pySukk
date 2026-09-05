@@ -1,7 +1,7 @@
 const PROTOCOL_VERSION = 1;
 const MAX_MESSAGE_BYTES = 64 * 1024;
 const MAX_ROOM_CONNECTIONS = 64;
-const STATE_TTL_SECONDS = 30;
+const STATE_TTL_SECONDS = 5;
 const MAX_ROSTER_SIZE = 64;
 
 const PLAYER_ID_PATTERN = /^\d{1,20}$/;
@@ -116,6 +116,12 @@ function normalizeState(message, roomId, authenticatedPlayerId) {
   if (activeWeapon === undefined) {
     return null;
   }
+  let loadout;
+  if (source.loadout !== undefined) {
+    if (!Array.isArray(source.loadout) || source.loadout.length > 64) return null;
+    loadout = source.loadout.map(safeActiveWeapon);
+    if (loadout.some((item) => !item)) return null;
+  }
 
   const sessionNumber = asInteger(source.session_number, 0, 1000000000);
   const mapName = typeof source.map === "string" ? source.map.slice(0, 64) : "";
@@ -131,6 +137,7 @@ function normalizeState(message, roomId, authenticatedPlayerId) {
     roster: safeRoster(source.roster),
     session_number: sessionNumber,
     active_weapon: activeWeapon,
+    ...(loadout === undefined ? {} : { loadout }),
     ttl_ms: 5000,
   };
 }
@@ -181,6 +188,9 @@ export class MatchRoom {
     this.state = state;
     this.env = env;
     this.roomId = null;
+    // Ephemeral cosmetics need no per-update database writes. Hibernation
+    // clears this cache; clients republish every two seconds to repopulate it.
+    this.players = new Map();
   }
 
   async fetch(request) {
@@ -197,12 +207,12 @@ export class MatchRoom {
 
     const [client, server] = Object.values(new WebSocketPair());
     this.state.acceptWebSocket(server);
-    server.serializeAttachment({ authenticated: false, player_id: null });
+    server.serializeAttachment({ authenticated: false, player_id: null, room_id: roomId });
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  _roomIdFromRequest() {
-    return this.roomId;
+  _roomIdFromRequest(webSocket) {
+    return this._attachment(webSocket)?.room_id || this.roomId;
   }
 
   _attachment(webSocket) {
@@ -230,6 +240,7 @@ export class MatchRoom {
     }
 
     let attachment = this._attachment(webSocket);
+    if (attachment?.superseded) return;
     if (!attachment?.authenticated) {
       if (parsed.type !== "hello" || parsed.protocol !== PROTOCOL_VERSION) {
         this._error(webSocket, "hello_required");
@@ -240,7 +251,7 @@ export class MatchRoom {
         return;
       }
       const playerId = safePlayerId(parsed.player_id);
-      if (!playerId || parsed.match_id !== this._roomIdFromRequest()) {
+      if (!playerId || parsed.match_id !== this._roomIdFromRequest(webSocket)) {
         this._error(webSocket, "invalid_room");
         return;
       }
@@ -251,6 +262,7 @@ export class MatchRoom {
         }
         const peerAttachment = this._attachment(peer);
         if (peerAttachment?.player_id === playerId) {
+          peer.serializeAttachment({ ...peerAttachment, superseded: true });
           try {
             peer.close(4002, "replaced");
           } catch {
@@ -262,32 +274,34 @@ export class MatchRoom {
       // A restarted client begins its local sequence counter at one. Remove
       // the previous ephemeral record so the new session is not rejected as
       // stale by the room's sequence check.
-      await this.state.storage.delete(`player:${playerId}`);
+      this.players.delete(playerId);
 
       attachment = {
         authenticated: true,
         player_id: playerId,
+        room_id: parsed.match_id,
+        relay_session: crypto.randomUUID(),
         map: typeof parsed.map === "string" ? parsed.map.slice(0, 64) : "",
       };
       webSocket.serializeAttachment(attachment);
       sendJson(webSocket, { type: "welcome", protocol: PROTOCOL_VERSION });
 
-      const storedStates = await this.state.storage.list({ prefix: "player:" });
-      for (const record of storedStates.values()) {
-        if (!record || record.state?.player_id === playerId) {
+      for (const record of this.players.values()) {
+        if (!record || record.state?.player_id === playerId || Date.now() - record.updated_at > STATE_TTL_SECONDS * 1000) {
           continue;
         }
         sendJson(webSocket, {
           type: "snapshot",
           protocol: PROTOCOL_VERSION,
           sequence: record.sequence,
+          relay_session: record.relay_session,
           state: record.state,
         });
       }
       return;
     }
 
-    if (parsed.protocol !== PROTOCOL_VERSION || parsed.match_id !== this._roomIdFromRequest()) {
+    if (parsed.protocol !== PROTOCOL_VERSION || parsed.match_id !== this._roomIdFromRequest(webSocket)) {
       this._error(webSocket, "invalid_room");
       return;
     }
@@ -305,29 +319,30 @@ export class MatchRoom {
       return;
     }
 
-    const state = normalizeState(parsed, this._roomIdFromRequest(), attachment.player_id);
+    const state = normalizeState(parsed, this._roomIdFromRequest(webSocket), attachment.player_id);
     const sequence = asInteger(parsed.sequence, 0, 1000000000);
     if (!state || sequence === null) {
       this._error(webSocket, "invalid_snapshot");
       return;
     }
 
-    const storageKey = `player:${attachment.player_id}`;
-    const previous = await this.state.storage.get(storageKey);
-    if (previous && sequence <= previous.sequence) {
+    const previous = this.players.get(attachment.player_id);
+    if (previous && previous.relay_session === attachment.relay_session && sequence < previous.sequence) {
       return;
     }
     const record = {
       sequence,
       state,
       updated_at: Date.now(),
+      relay_session: attachment.relay_session,
     };
-    await this.state.storage.put(storageKey, record, { expirationTtl: STATE_TTL_SECONDS });
+    this.players.set(attachment.player_id, record);
 
     const outgoing = {
       type: "snapshot",
       protocol: PROTOCOL_VERSION,
       sequence,
+      relay_session: attachment.relay_session,
       state,
     };
     for (const peer of this.state.getWebSockets()) {
@@ -342,10 +357,20 @@ export class MatchRoom {
   }
 
   webSocketClose(webSocket) {
+    const attachment = this._attachment(webSocket);
+    if (attachment?.player_id) {
+      const record = this.players.get(attachment.player_id);
+      if (record?.relay_session === attachment.relay_session) this.players.delete(attachment.player_id);
+      for (const peer of this.state.getWebSockets()) {
+        if (peer !== webSocket && this._attachment(peer)?.authenticated) {
+          sendJson(peer, { type: "player_left", player_id: attachment.player_id, relay_session: attachment.relay_session });
+        }
+      }
+    }
     try {
       webSocket.close();
     } catch {
-      // Nothing else is needed; stored state expires automatically.
+      // Already closed.
     }
   }
 

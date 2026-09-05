@@ -244,7 +244,8 @@ class MatchDiagnostics:
             if max_clients and 1 <= max_clients <= MAX_PLAYER_SLOTS:
                 slot_count = max_clients
 
-            for slot in range(slot_count):
+            # Player controller indices are 1..max_clients, inclusive.
+            for slot in range(1, slot_count + 1):
                 try:
                     list_entry = memfuncs.ProcMemHandler.ReadPointer(
                         process_handle,

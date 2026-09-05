@@ -1,9 +1,4 @@
-"""Client-only state sharing for the future remote skin applier.
-
-Number 2 deliberately stops at the transport/state layer. It observes the
-read-only match snapshot, packages the local player's currently equipped skin,
-and optionally exchanges snapshots with a relay. It does not write to cs2.exe
-and it does not apply received data to any game entity.
+"""Background skin sharing and validated state-file bridge to the renderer.
 
 The transport accepts newline-delimited JSON over TCP/TLS for local tools and
 text JSON WebSockets for the Cloudflare relay. An empty relay setting keeps
@@ -23,6 +18,7 @@ from urllib.parse import urlsplit
 
 from ext import items
 from features._relay_transport import RelayConnection
+from features import skinshare_apply
 
 
 PROTOCOL_VERSION = 1
@@ -116,7 +112,8 @@ def build_local_payload(snapshot, options):
 
     Only a settled live match is eligible. The payload contains the current
     roster so the relay can later support migration when a player joins or
-    leaves. The active weapon is the only skin configuration sent.
+    leaves. Configured equipment is included so remote weapon switches do not
+    depend on catching the same active-weapon sample on both computers.
     """
     if not snapshot or snapshot.get("phase") != "LIVE":
         return None
@@ -148,9 +145,16 @@ def build_local_payload(snapshot, options):
     by_def = _weapon_index(database)
     active_def = local_player.get("active_def")
     active_weapon = None
-    if active_def is not None and active_def in by_def:
-        active_name, active_item = by_def[active_def]
-        skin_config = (options.get("SkinChanger", {}) or {}).get("weapons", {}) or {}
+    cfg = options.get("SkinChanger", {}) or {}
+    skin_config = (cfg.get("weapons", {}) or {}) if cfg.get("enabled", False) else {}
+    loadout = []
+    for name, skin in skin_config.items():
+        record = _skin_record(database, name, skin)
+        if record and skinshare_apply.resolve_selection(record, database):
+            record["source_def"] = record["target_def"]
+            loadout.append(record)
+    if active_def is not None and (active_def in by_def or skinshare_apply.is_knife(active_def)):
+        active_name, active_item = by_def.get(active_def, ("", {"category": "knives"}))
         selected_name = active_name
 
         # Knife selection follows the existing local skin changer: the last
@@ -177,6 +181,7 @@ def build_local_payload(snapshot, options):
         "roster": roster,
         "session_number": int(snapshot.get("session_number", 0)),
         "active_weapon": active_weapon,
+        "loadout": loadout[:64],
         "ttl_ms": SNAPSHOT_TTL_MS,
     }
 
@@ -214,6 +219,11 @@ def _validate_remote_state(message, current_payload):
         return None
     if player_id == current_payload.get("player_id"):
         return None
+    if player_id not in current_payload.get("roster", []) or state.get("map") != current_payload.get("map"):
+        return None
+    if "loadout" in state:
+        if not isinstance(state["loadout"], list) or len(state["loadout"]) > 64:
+            return None
     active = state.get("active_weapon")
     if active is not None:
         if not isinstance(active, dict) or not _valid_item_key(active.get("item_key")):
@@ -253,10 +263,15 @@ class SkinShareClient:
         self._latest_signature = None
         self._latest_revision = 0
         self._last_snapshot = None
+        self._last_snapshot_time = 0.0
         self._last_main_update = 0.0
         self._skin_config_signature = None
         self._settings_signature = None
         self._remote_states = {}
+        self._render_path = os.path.join(os.path.expanduser("~"), "cs2py_remote_skins.txt")
+        self._next_render_write = 0.0
+        self._last_render_signature = None
+        self._last_render_error = None
         self._thread = threading.Thread(
             target=self._worker,
             name="cs2py-skin-share",
@@ -287,6 +302,7 @@ class SkinShareClient:
             self._last_main_update = now
             if snapshot is not None:
                 self._last_snapshot = snapshot
+                self._last_snapshot_time = now
             settings_changed = settings_signature != self._settings_signature
             snapshot_changed = snapshot is not None
             config_changed = skin_signature != self._skin_config_signature
@@ -338,6 +354,34 @@ class SkinShareClient:
                 player_id: dict(state)
                 for player_id, state in self._remote_states.items()
             }
+
+    def _publish_render_state(self, connected):
+        now = time.monotonic()
+        if now < self._next_render_write:
+            return
+        self._next_render_write = now + 0.5
+        with self._lock:
+            snapshot = self._last_snapshot
+            fresh = (now - self._last_main_update <= MAIN_UPDATE_TIMEOUT_SECONDS
+                     and now - self._last_snapshot_time <= MAIN_UPDATE_TIMEOUT_SECONDS)
+            states = dict(self._remote_states) if connected and fresh and self._enabled else {}
+        try:
+            records = skinshare_apply.build_render_records(snapshot, states, items.get_database() or {}, now)
+            skinshare_apply.write_atomic(self._render_path, skinshare_apply.render_file(snapshot, records))
+            signature = _stable_signature(records)
+            if signature != self._last_render_signature:
+                self._last_render_signature = signature
+                _log(f"render bridge targets={len(records)}")
+                for record in records:
+                    _log(f"mapped player={record['player_id']} slot={record['slot']} "
+                         f"kind={'gloves' if record['kind'] else 'weapon'} "
+                         f"def={record['target']} paint_kit={record['paint']} model={record['model']}")
+            self._last_render_error = None
+        except Exception as exc:
+            name = type(exc).__name__
+            if name != self._last_render_error:
+                _log(f"render bridge error={name}")
+                self._last_render_error = name
 
     def shutdown(self):
         self._stop.set()
@@ -407,6 +451,12 @@ class SkinShareClient:
         if not isinstance(message, dict):
             return
         message_type = message.get("type")
+        if message_type == "player_left":
+            with self._lock:
+                previous = self._remote_states.get(message.get("player_id"))
+                if previous and previous.get("relay_session") == message.get("relay_session"):
+                    self._remote_states.pop(message["player_id"], None)
+            return
         if message_type == "welcome":
             # A client process can restart its local sequence counter. The
             # relay resets that player's room state on hello, so discard the
@@ -431,11 +481,17 @@ class SkinShareClient:
         with self._lock:
             previous = self._remote_states.get(player_id)
             previous_sequence = int(previous.get("sequence", -1)) if previous else -1
-            if sequence <= previous_sequence:
+            same_session = previous and previous.get("relay_session") == message.get("relay_session")
+            if same_session and sequence < previous_sequence:
+                return
+            if same_session and sequence == previous_sequence:
+                previous["received_monotonic"] = time.monotonic()
                 return
             stored = dict(state)
             stored["sequence"] = sequence
+            stored["relay_session"] = message.get("relay_session")
             stored["received_at"] = time.time()
+            stored["received_monotonic"] = time.monotonic()
             self._remote_states[player_id] = stored
         if not previous or sequence != previous_sequence:
             _log(f"received player={player_id} sequence={sequence}")
@@ -452,6 +508,7 @@ class SkinShareClient:
         receive_buffer = b""
 
         while not self._stop.is_set():
+            self._publish_render_state(sock is not None)
             settings = self._settings()
             now = time.monotonic()
             stale_main = now - settings["last_main_update"] > MAIN_UPDATE_TIMEOUT_SECONDS
@@ -540,7 +597,8 @@ class SkinShareClient:
                     sent_revision = -1
                     _log(f"room candidate={connected_match}")
 
-                if sent_revision != settings["revision"]:
+                # Renew remote liveness even while the loadout is unchanged.
+                if sent_revision != settings["revision"] or now - last_heartbeat >= HEARTBEAT_SECONDS:
                     sock.send({
                         "type": "snapshot",
                         "protocol": PROTOCOL_VERSION,

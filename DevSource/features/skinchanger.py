@@ -341,6 +341,9 @@ def SkinChanger_Update(processHandle, clientBaseAddress, Offsets, Options):
     global _last_disabled_log, _last_weapons_sig
     cfg = Options.get("SkinChanger", {}) or {}
     if not cfg.get("enabled", False):
+        if (Options.get("SkinShare", {}) or {}).get("enabled", False):
+            inject.inject_skinchanger(processHandle)
+            _write_skin_config({"SkinChanger": {"weapons": {}}})
         now = time.monotonic()
         if now - _last_disabled_log > 5.0:
             _last_disabled_log = now

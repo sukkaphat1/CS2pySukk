@@ -426,7 +426,8 @@ static void ReadConfig() {
         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) return;
     DWORD size = GetFileSize(f, NULL);
-    if (size == 0 || size >= sizeof(g_filebuf)) { CloseHandle(f); return; }
+    if (size == 0) { g_skin_count = 0; CloseHandle(f); return; }
+    if (size >= sizeof(g_filebuf)) { CloseHandle(f); return; }
     DWORD rd = 0;
     if (!ReadFile(f, g_filebuf, size, &rd, NULL)) { CloseHandle(f); return; }
     CloseHandle(f);
@@ -738,6 +739,8 @@ static void ApplyGloves(uintptr_t client, uintptr_t pawn) {
     }
 }
 
+#include "skinshare_remote.h"
+
 // ---- main loop ----------------------------------------------------------
 
 static void Loop() {
@@ -747,6 +750,7 @@ static void Loop() {
         return;
     }
     DllLog("loop: client.dll base=%p", (void*)client);
+    DllLog("skin-share renderer: version=1 SteamID ownership mapping enabled");
     ResolveFunctions();
     DllLog("loop: entering main loop, skins=%d", g_skin_count);
 
@@ -769,6 +773,8 @@ static void Loop() {
         // crashing cs2 (access violation) on "exit to main menu" / match end.
         uintptr_t gameRules = *(uintptr_t*)(client + OFF_DW_GAMERULES);
         if (!gameRules) {
+            // Discard pointers from the previous map without dereferencing them.
+            memset(g_remoteCache,0,sizeof(g_remoteCache));
             Sleep(250);
             continue;
         }
@@ -869,6 +875,8 @@ static void Loop() {
         AcquireSRWLockShared(&g_lock);
         ApplyGloves(client, pawn);
         ReleaseSRWLockShared(&g_lock);
+
+        ApplyRemoteSkins(client);
 
         Sleep(250);
     }
