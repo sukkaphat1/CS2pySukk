@@ -40,6 +40,9 @@ class ManagedConfig:
 		self._dict.update(*args, **kwargs)
 		self._save_function(self._dict)
 
+	def save_now(self):
+		self._save_function(self._dict, force=True)
+
 	def __setitem__(self, key, value):
 		self._dict[key] = value
 		self._save_function(self._dict)
@@ -71,10 +74,10 @@ class ManagedConfig:
 
 _save_ts = 0.0
 
-def SaveConfig(options):
+def SaveConfig(options, force=False):
 	global _save_ts
 	now = time.monotonic()
-	if now - _save_ts < 0.5:
+	if not force and now - _save_ts < 0.5:
 		return
 	_save_ts = now
 	with open(globals.SAVE_FILE, 'w') as fp:

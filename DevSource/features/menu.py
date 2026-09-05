@@ -13,8 +13,10 @@ import pyMeow as pme
 
 from ext import items
 from ext import paths
+from functions import memfuncs
 from features import preview
 from features import skinchanger
+from features import combined
 
 
 def _read_version():
@@ -391,7 +393,42 @@ def _draw_esp_tab(Options):
     _slider(Options, "GrenadeTrajectoryGhostFade", x, y, 280, "Ghost Fade", 0.0, 4.0, is_int=False)
 
 
-def _draw_trigger_tab(Options):
+_tap_save_status = ""
+
+
+def _save_current_weapon_tap_time(proc, clientBase, Offsets, Options):
+    """Use the existing per-weapon table, but detect the weapon at click time."""
+    global _tap_save_status
+    try:
+        pawn = memfuncs.ProcMemHandler.ReadPointer(
+            proc, clientBase + Offsets.offset.dwLocalPlayerPawn)
+        weapon = combined.get_current_weapon_name(proc, clientBase, pawn, Offsets) if pawn else None
+        if not weapon or weapon.startswith("Unknown("):
+            _tap_save_status = "No supported weapon detected. Hold a gun and try again."
+            return False
+        if weapon in {"Knife", "Flashbang", "HE Grenade", "Smoke Grenade", "Molotov", "Decoy Grenade", "Incendiary Grenade"}:
+            _tap_save_status = "Hold a gun to save its tap time."
+            return False
+        tap = float(Options.get("TriggerbotTapInterval", 0.0))
+        if not math.isfinite(tap) or not 0.0 <= tap <= 2.0:
+            _tap_save_status = "Choose a tap interval between 0 and 2 seconds."
+            return False
+        times = dict(Options.get("WeaponTapTimes", {}) or {})
+        times[weapon] = tap
+        Options.update({"WeaponTapTimes": times, "CurrentWeapon": weapon})
+        # Slider changes can use the normal save throttle; an explicit Save
+        # click must reach disk even immediately after moving that slider.
+        save_now = getattr(Options, "save_now", None)
+        if callable(save_now):
+            save_now()
+        _tap_save_status = f"Saved {tap:.2f}s for {weapon}."
+        return True
+    except Exception:
+        _tap_save_status = "Could not save tap time. Check the held weapon and try again."
+        return False
+
+
+def _draw_trigger_tab(proc, clientBase, Options, Offsets):
     x = WIN_X + 40.0
     y = COLS_Y
     _check(Options, "EnableTriggerbot", x, y, "Enable Triggerbot"); y += 28
@@ -399,6 +436,11 @@ def _draw_trigger_tab(Options):
     _check(Options, "EnableTriggerbotKeyCheck", x, y, "Key Check"); y += 28
     _check(Options, "EnablePerWeaponTapTimes", x, y, "Per-Weapon Tap Times"); y += 28
     _slider(Options, "TriggerbotTapInterval", x, y, 280, "Tap Interval", 0.0, 2.0, is_int=False); y += 28
+    pme.gui_label(x, y, 460, 22, f"Current weapon: {Options.get('CurrentWeapon') or 'Not detected'}"); y += 26
+    if pme.gui_button(x, y, 280, 26, "Apply / Save Tap Time"):
+        _save_current_weapon_tap_time(proc, clientBase, Offsets, Options)
+    y += 30
+    pme.gui_label(x, y, 600, 22, _tap_save_status); y += 28
     _keybind(Options, "TriggerbotKey", x, y, "Triggerbot Key")
 
 
@@ -461,7 +503,7 @@ def draw(proc, clientBase, Options, Offsets):
     elif _tab == 2:
         _draw_esp_tab(Options)
     elif _tab == 3:
-        _draw_trigger_tab(Options)
+        _draw_trigger_tab(proc, clientBase, Options, Offsets)
     elif _tab == 4:
         _draw_reactions_tab(Options)
     elif _tab == 5:
