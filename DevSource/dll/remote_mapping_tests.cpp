@@ -63,6 +63,15 @@ extern "C" void RemoteTestMain() {
     *(uintptr_t*)(chunk+0x70*200) = weapon;
     *(uintptr_t*)(client+OFF_DW_GAMERULES) = 123456;
     *(uintptr_t*)(client+OFF_DW_LOCAL_PLAYER_PAWN) = local;
+    // Production lifetime guard runs against fixture-owned engine memory too.
+    g_liveEngine = Allocate(10*1024*1024);
+    uintptr_t network = Allocate(4096);
+    *(uintptr_t*)(g_liveEngine+OFF_ENGINE_NETWORK) = network;
+    *(int*)(network+OFF_ENGINE_SIGNON) = 6;
+    g_control.pid = GetCurrentProcessId();
+    g_control.deadline = remote_now_ms()+5000;
+    g_control.rules = 123456; g_control.list = list;
+    g_localEnabled = g_shareEnabled = 1;
     *(uint32_t*)(local+R_CONTROLLER) = 1;
     *(uint64_t*)(localController+R_STEAMID) = 76561198864001604ULL;
     *(uint64_t*)(controller+R_STEAMID) = 76561198000000002ULL;
@@ -166,7 +175,7 @@ extern "C" void RemoteTestMain() {
     Check(updateCalls == beforeGap && cache->valid,27);
     *(uint8_t*)(node+259) = 0;
     int beforeExpiry = attrCalls;
-    g_remoteDeadline = 0; g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    RemoteRestore(client,cache); // explicit live removal, not expired permission
     Check(*(int*)(weapon+OFF_M_FALLBACKPAINTKIT) == 51 && attrCalls == beforeExpiry+3,13);
     // Default knife -> butterfly uses the world weapon model, then restores.
     uintptr_t originalModel = Allocate(4096);
@@ -179,7 +188,7 @@ extern "C" void RemoteTestMain() {
     ApplyRemoteSkins(client);
     Check(*(uint16_t*)(item+OFF_M_ITEMDEFINDEX) == 515 && modelCalls == 1,17);
     Check(vmCalls == 1 && vmWeapon == weapon && *(uint8_t*)(weapon+5816) == 1,29);
-    g_remoteDeadline = 0; g_remoteReadTick = GetTickCount64(); ApplyRemoteSkins(client);
+    RemoteRestore(client,RemoteCacheFor(&g_remote[0]));
     Check(*(uint16_t*)(item+OFF_M_ITEMDEFINDEX) == 42 && modelCalls == 2,18);
     // Old glove records and direct glove functions must not write anything.
     g_remote[0] = saved; g_remote[0].kind = 1; g_remote[0].handle = 0;
@@ -309,6 +318,7 @@ extern "C" void RemoteTestMain() {
     ApplyLocalSkins(client);
     // Map/session transition clears all physical-weapon bindings.
     *(uintptr_t*)(client+OFF_DW_GAMERULES) = 234567;
+    g_control.rules = 234567;
     Check(!FindWeaponBinding(client,0x100ca,donated),50);
     // Remote model finalization uses the same material-only second stage.
     memset(g_remoteCache,0,sizeof(g_remoteCache));
@@ -366,5 +376,44 @@ extern "C" void RemoteTestMain() {
     // Malformed/overflow input fails closed, clearing the render batch.
     const char badFile[] = "CS2PY_REMOTE_V1 18446744073709551616 0 0 0";
     Check(!RemoteParse(badFile,badFile+sizeof(badFile)-1) && g_remoteCount == 0,16);
+    // Disabled entry points must not repair fields, models or cached restores.
+    beforeRepair = attrCalls + updateCalls + modelCalls;
+    *(int*)(donated+OFF_M_FALLBACKPAINTKIT) = -123;
+    *(int*)(weapon+OFF_M_FALLBACKPAINTKIT) = -123;
+    g_localEnabled = g_shareEnabled = 0;
+    ApplyLocalSkins(client); ApplyRemoteSkins(client);
+    RemoteRestore(client,cache);
+    Check(*(int*)(donated+OFF_M_FALLBACKPAINTKIT) == -123 &&
+        *(int*)(weapon+OFF_M_FALLBACKPAINTKIT) == -123 &&
+        beforeRepair == attrCalls+updateCalls+modelCalls,65);
+    // Local toggle off still permits donor pickups, but not own saved loadout.
+    g_shareEnabled = 1;
+    ApplyLocalSkins(client);
+    Check(*(int*)(donated+OFF_M_FALLBACKPAINTKIT) == -123,66);
+    g_localEnabled = 1;
+    *(int*)(network+OFF_ENGINE_SIGNON) = 0;
+    ApplyLocalSkins(client); ApplyRemoteSkins(client);
+    Check(*(int*)(donated+OFF_M_FALLBACKPAINTKIT) == -123 &&
+        beforeRepair == attrCalls+updateCalls+modelCalls,67);
+    *(int*)(network+OFF_ENGINE_SIGNON) = 6;
+    g_control.deadline = 0;
+    ApplyLocalSkins(client); ApplyRemoteSkins(client);
+    Check(*(int*)(donated+OFF_M_FALLBACKPAINTKIT) == -123,68);
+    g_control.deadline = remote_now_ms()+3000;
+    cache->valid = 1;
+    g_remoteDeadline = 0; g_remoteReadTick = GetTickCount64();
+    ApplyRemoteSkins(client);
+    Check(!cache->valid && *(int*)(weapon+OFF_M_FALLBACKPAINTKIT) == -123 &&
+        beforeRepair == attrCalls+updateCalls+modelCalls,74);
+    // An unmapped client root returns zero rather than faulting on teardown.
+    uintptr_t freed = Allocate(4096);
+    VirtualFree((void*)freed,0,MEM_RELEASE);
+    Check(ReadRoot(freed) == 0 && !RendererSessionCurrent(freed),69);
+    const char control[] = "CS2PY_CONTROL_V1 123 1100 1 1 123456 234567";
+    Check(ControlParse(control,control+sizeof(control)-1,123,1000) && g_localEnabled && g_shareEnabled,70);
+    Check(!ControlParse(control,control+sizeof(control)-1,124,1000) && !g_localEnabled && !g_shareEnabled,71);
+    Check(!ControlParse(control,control+sizeof(control)-1,123,1100) && !g_localEnabled && !g_shareEnabled,72);
+    const char malformedControl[] = "CS2PY_CONTROL_V1 123 1100 2 1 123456 234567";
+    Check(!ControlParse(malformedControl,malformedControl+sizeof(malformedControl)-1,123,1000),73);
     ExitProcess(0);
 }

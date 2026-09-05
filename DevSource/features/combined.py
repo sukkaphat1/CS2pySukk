@@ -3,6 +3,7 @@ from ext.datatypes import *
 from functions import memfuncs
 from functions import calculations
 from functions import gameinput
+from features.live_context import read_context
 
 import globals
 import win32api, win32gui
@@ -49,20 +50,27 @@ _last_known_weapon = None
 
 def Triggerbot_AntiFlash_Update(processHandle, clientBaseAddress, Offsets, Options):
 	global _last_tap_time, _reaction_done, _reaction_deadline, _last_known_weapon
-	localPlayer = memfuncs.ProcMemHandler.ReadPointer(processHandle, clientBaseAddress + Offsets.offset.dwLocalPlayerPawn)
-	if (not localPlayer): return
-
 	try:
+		o = Offsets.offset
+		context = read_context(processHandle, clientBaseAddress, o)
+		if context is None:
+			_reaction_done = False
+			return
+		localPlayer = context.pawn
 		if Options["EnableAntiFlashbang"]:
-			memfuncs.ProcMemHandler.WriteFloat(processHandle, localPlayer + Offsets.offset.m_flFlashMaxAlpha, 0.0)
-		else:
-			memfuncs.ProcMemHandler.WriteFloat(processHandle, localPlayer + Offsets.offset.m_flFlashMaxAlpha, 255.0)
+			alpha_address = localPlayer + o.m_flFlashMaxAlpha
+			if memfuncs.ProcMemHandler.ReadFloat(processHandle, alpha_address) != 0.0 and context.current(processHandle, clientBaseAddress, o):
+				memfuncs.ProcMemHandler.WriteFloat(processHandle, alpha_address, 0.0)
+		# Disabled means no game-memory writes, including default restoration.
 
 		weapon_name = get_current_weapon_name(processHandle, clientBaseAddress, localPlayer, Offsets)
 		if weapon_name and weapon_name != _last_known_weapon:
 			_last_known_weapon = weapon_name
 			if Options.get("CurrentWeapon", "") != weapon_name:
 				Options["CurrentWeapon"] = weapon_name
+		if not Options.get("EnableTriggerbot", False):
+			_reaction_done = False
+			return
 
 		key_held = (win32api.GetAsyncKeyState(Options["TriggerbotKey"]) or not Options["EnableTriggerbotKeyCheck"])
 

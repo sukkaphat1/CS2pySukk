@@ -1,41 +1,54 @@
-from ext.datatypes import *
-
-from functions import memfuncs
-from functions import calculations
-from functions import gameinput
-
-import globals
-import win32api, win32gui
 import time
+from types import SimpleNamespace
+from functions import memfuncs
+from features.live_context import read_context, valid_pointer
+
+
+def FovChanger_Update(process, client, Offsets, Options):
+    """One guarded pass; disabled never writes a default FOV."""
+    if not Options.get("EnableFovChanger", False):
+        return
+    try:
+        o = Offsets.offset
+        context = read_context(process, client, o)
+        if context is None:
+            return
+        camera = memfuncs.ProcMemHandler.ReadPointer(process, context.pawn + o.m_pCameraServices)
+        if not valid_pointer(camera) or memfuncs.ProcMemHandler.ReadBool(process, context.pawn + o.m_bIsScoped):
+            return
+        desired = int(Options["FovChangeSize"])
+        if not 1 <= desired <= 179:
+            return
+        if memfuncs.ProcMemHandler.ReadInt(process, camera + o.m_iFOV) != desired:
+            if (context.current(process, client, o) and
+                memfuncs.ProcMemHandler.ReadPointer(process, context.pawn + o.m_pCameraServices) == camera and
+                not memfuncs.ProcMemHandler.ReadBool(process, context.pawn + o.m_bIsScoped)):
+                memfuncs.ProcMemHandler.WriteInt(process, camera + o.m_iFOV, desired)
+    except Exception:
+        # A process/map can disappear between any two memory operations.
+        return
+
 
 def FovChangerThreadFunction(Options, Offsets):
-
-	processHandle = memfuncs.GetProcess("cs2.exe")
-	clientBaseAddress = memfuncs.GetModuleBase(modulename="client.dll", process_object=processHandle)
-
-	while True:
-		localPlayer = memfuncs.ProcMemHandler.ReadPointer(processHandle, clientBaseAddress + Offsets.offset.dwLocalPlayerPawn)
-		if (not localPlayer):
-			time.sleep(0.05)
-			continue
-
-		try:
-			cameraServices = memfuncs.ProcMemHandler.ReadPointer(processHandle, localPlayer + Offsets.offset.m_pCameraServices)
-			currentFOV = memfuncs.ProcMemHandler.ReadInt(processHandle, cameraServices + Offsets.offset.m_iFOV)
-			isScopedDown = memfuncs.ProcMemHandler.ReadBool(processHandle, localPlayer + Offsets.offset.m_bIsScoped)
-
-			if isScopedDown:
-				pass  
-			else:
-				if Options["EnableFovChanger"]:
-					desiredFov = Options["FovChangeSize"]
-				else:
-					desiredFov = 90
-
-				if currentFOV != desiredFov:
-					memfuncs.ProcMemHandler.WriteInt(processHandle, cameraServices + Offsets.offset.m_iFOV, desiredFov)
-
-		except:
-			pass
-
-		time.sleep(0.01)
+    while True:
+        if not Options.get("EnableFovChanger", False):
+            time.sleep(0.1)
+            continue
+        process = None
+        try:
+            process = memfuncs.GetProcess("cs2.exe")
+            # Reacquire periodically, rather than caching a module indefinitely.
+            client = memfuncs.GetModuleBase("client.dll", process)
+            snapshot = SimpleNamespace(offset=Offsets.offset)
+            snapshot.offset._engine_base = memfuncs.GetModuleBase("engine2.dll", process) or 0
+            for _ in range(20):
+                FovChanger_Update(process, client, snapshot, Options)
+                time.sleep(0.05)
+        except Exception:
+            time.sleep(0.25)
+        finally:
+            if process is not None:
+                try:
+                    process.close_process()
+                except Exception:
+                    pass

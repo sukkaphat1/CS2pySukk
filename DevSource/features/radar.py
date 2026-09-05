@@ -1,52 +1,56 @@
-from ext.datatypes import *
-from functions import memfuncs
+"""Bounded radar updates; no work while disabled, no unchanged field writes."""
+import time
+from functions.memfuncs import ProcMemHandler as mem
+from features.live_context import read_context, resolve
+
+_next_poll = 0.0
+POLL_SECONDS = 0.1
 
 
-def is_valid_address(address):
-	return address is not None and 0x10000 < address < 0x7FFFFFFFFFFF
-
-
-def RadarHack_Update(processHandle, clientBaseAddress, Offsets):
-	"""Force every enemy player to show as spotted on the radar."""
-	try:
-		localPawn = memfuncs.ProcMemHandler.ReadPointer(processHandle, clientBaseAddress + Offsets.offset.dwLocalPlayerPawn)
-		if not localPawn:
-			return
-		localTeam = memfuncs.ProcMemHandler.ReadInt(processHandle, localPawn + Offsets.offset.m_iTeamNum)
-		EntityList = memfuncs.ProcMemHandler.ReadPointer(processHandle, clientBaseAddress + Offsets.offset.dwEntityList)
-		if not EntityList:
-			return
-
-		for i in range(64):
-			try:
-				ListEntry = memfuncs.ProcMemHandler.ReadPointer(processHandle, EntityList + (8 * (i & 0x7FFF) >> 9) + 16)
-				if not ListEntry:
-					continue
-
-				controller = memfuncs.ProcMemHandler.ReadPointer(processHandle, ListEntry + 112 * (i & 0x1FF))
-				if not controller:
-					continue
-
-				pawnHandle = memfuncs.ProcMemHandler.ReadInt(processHandle, controller + Offsets.offset.m_hPlayerPawn)
-				if pawnHandle == 0:
-					continue
-
-				ListEntry2 = memfuncs.ProcMemHandler.ReadPointer(processHandle, EntityList + 0x8 * ((pawnHandle & 0x7FFF) >> 9) + 0x10)
-				if not ListEntry2:
-					continue
-
-				pawn = memfuncs.ProcMemHandler.ReadPointer(processHandle, ListEntry2 + 0x70 * (pawnHandle & 0x1FF))
-				if not pawn or pawn == localPawn:
-					continue
-
-				team = memfuncs.ProcMemHandler.ReadInt(processHandle, pawn + Offsets.offset.m_iTeamNum)
-				if team == localTeam or team < 2:
-					continue
-
-				spottedState = pawn + Offsets.offset.m_entitySpottedState
-				memfuncs.ProcMemHandler.WriteBool(processHandle, spottedState + Offsets.offset.m_bSpotted, True)
-				memfuncs.ProcMemHandler.WriteUInt(processHandle, spottedState + Offsets.offset.m_bSpottedByMask, 0xFFFFFFFF)
-			except Exception:
-				continue
-	except Exception:
-		pass
+def RadarHack_Update(process, client, Offsets, Options):
+    global _next_poll
+    if not Options.get("EnableRadarHack", False):
+        _next_poll = 0.0
+        return
+    now = time.monotonic()
+    if now < _next_poll:
+        return
+    _next_poll = now + POLL_SECONDS
+    try:
+        o = Offsets.offset
+        context = read_context(process, client, o)
+        if context is None:
+            return
+        local_team = mem.ReadInt(process, context.pawn + o.m_iTeamNum)
+        for slot in range(1, 65):
+            try:
+                controller = resolve(process, context.entities, slot)
+                if not controller or controller == context.controller:
+                    continue
+                handle = mem.ReadUInt(process, controller + o.m_hPlayerPawn)
+                pawn = resolve(process, context.entities, handle)
+                if not pawn or pawn == context.pawn:
+                    continue
+                team = mem.ReadInt(process, pawn + o.m_iTeamNum)
+                if team == local_team or team not in (2, 3) or mem.ReadInt(process, pawn + o.m_iHealth) <= 0:
+                    continue
+                if mem.ReadBytes(process, pawn + o.m_lifeState, 1) != b"\x00":
+                    continue
+                spotted = pawn + o.m_entitySpottedState
+                flag = mem.ReadBool(process, spotted + o.m_bSpotted)
+                mask = mem.ReadUInt(process, spotted + o.m_bSpottedByMask)
+                if flag and mask == 0xFFFFFFFF:
+                    continue
+                if not context.current(process, client, o):
+                    return
+                if (mem.ReadUInt(process, controller + o.m_hPlayerPawn) != handle or
+                    resolve(process, context.entities, handle) != pawn):
+                    continue
+                if not flag:
+                    mem.WriteBool(process, spotted + o.m_bSpotted, True)
+                if mask != 0xFFFFFFFF:
+                    mem.WriteUInt(process, spotted + o.m_bSpottedByMask, 0xFFFFFFFF)
+            except Exception:
+                continue
+    except Exception:
+        return

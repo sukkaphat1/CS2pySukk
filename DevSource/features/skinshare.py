@@ -272,6 +272,7 @@ class SkinShareClient:
         self._next_render_write = 0.0
         self._last_render_signature = None
         self._last_render_error = None
+        self._render_disabled_published = False
         self._thread = threading.Thread(
             target=self._worker,
             name="cs2py-skin-share",
@@ -362,12 +363,16 @@ class SkinShareClient:
         self._next_render_write = now + 0.25
         with self._lock:
             snapshot = self._last_snapshot
+            enabled = self._enabled
+            if not enabled and self._render_disabled_published:
+                return
             fresh = (now - self._last_main_update <= MAIN_UPDATE_TIMEOUT_SECONDS
                      and now - self._last_snapshot_time <= MAIN_UPDATE_TIMEOUT_SECONDS)
             states = dict(self._remote_states) if connected and fresh and self._enabled else {}
         try:
             records = skinshare_apply.build_render_records(snapshot, states, items.get_database() or {}, now)
             skinshare_apply.write_atomic(self._render_path, skinshare_apply.render_file(snapshot, records))
+            self._render_disabled_published = not enabled
             signature = _stable_signature(records)
             if signature != self._last_render_signature:
                 self._last_render_signature = signature

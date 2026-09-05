@@ -141,7 +141,7 @@ static int RemoteResolve(uintptr_t client, const RemoteEntry* r, uintptr_t* pawn
     uintptr_t pawn = ResolveEntity(client,r->pawn);
     g_remoteReject = "pawn_identity";
     if (!remote_readable(pawn,OFF_M_HHUDMODELARMS+4) ||
-        pawn == *(uintptr_t*)(client+OFF_DW_LOCAL_PLAYER_PAWN) ||
+        pawn == ReadRoot(client+OFF_DW_LOCAL_PLAYER_PAWN) ||
         ResolveEntity(client,*(uint32_t*)(pawn+R_CONTROLLER)) != controller) return 0;
     g_remoteReject = "player_dead";
     if (activeRequired && *(int*)(pawn+R_HEALTH) <= 0) return 0;
@@ -267,8 +267,8 @@ struct WeaponBinding {
 static WeaponBinding g_bindings[256];
 static uintptr_t g_bindingRules = 0, g_bindingList = 0;
 static void BindingSession(uintptr_t client) {
-    uintptr_t rules = *(uintptr_t*)(client+OFF_DW_GAMERULES);
-    uintptr_t list = *(uintptr_t*)(client+OFF_DW_ENTITY_LIST);
+    uintptr_t rules = ReadRoot(client+OFF_DW_GAMERULES);
+    uintptr_t list = ReadRoot(client+OFF_DW_ENTITY_LIST);
     if (!rules || rules != g_bindingRules || list != g_bindingList) {
         memset(g_bindings,0,sizeof(g_bindings));
         g_bindingRules = rules; g_bindingList = list;
@@ -345,6 +345,7 @@ static void RemoteRefresh(uintptr_t entity, uintptr_t item, const SkinCfg* cfg, 
     RefreshWeaponMaterials(entity,cfg);
 }
 static void RemoteRestore(uintptr_t client, RemoteCache* c) {
+    if (!g_shareEnabled || !RendererSessionCurrent(client)) { c->valid = 0; return; }
     uintptr_t pawn, entity;
     if (c->valid && RemoteResolve(client,&c->entry,&pawn,&entity,1) &&
         pawn == c->pawn && entity == c->entity && *(uintptr_t*)(entity+16) == c->identity && g_setAttr) {
@@ -416,9 +417,10 @@ static LocalSkinState* LocalCacheFor(uint32_t handle, uintptr_t entity) {
 }
 
 static void ApplyLocalSkins(uintptr_t client) {
+    if ((!g_localEnabled && !g_shareEnabled) || !RendererSessionCurrent(client)) return;
     BindingSession(client);
-    uintptr_t rules = *(uintptr_t*)(client+OFF_DW_GAMERULES);
-    uintptr_t pawn = *(uintptr_t*)(client+OFF_DW_LOCAL_PLAYER_PAWN);
+    uintptr_t rules = ReadRoot(client+OFF_DW_GAMERULES);
+    uintptr_t pawn = ReadRoot(client+OFF_DW_LOCAL_PLAYER_PAWN);
     if (!rules || !remote_readable(pawn,OFF_M_HHUDMODELARMS+4) || *(int*)(pawn+R_HEALTH) <= 0) {
         if (!rules || (remote_readable(pawn,R_HEALTH+4) && *(int*)(pawn+R_HEALTH) <= 0))
             memset(g_localSkins,0,sizeof(g_localSkins));
@@ -442,7 +444,7 @@ static void ApplyLocalSkins(uintptr_t client) {
     uint16_t def = *(uint16_t*)(RemoteItem(entity,0)+OFF_M_ITEMDEFINDEX);
     SkinCfg selected = {}; uint16_t target = 0;
     AcquireSRWLockShared(&g_lock);
-    for (int i = 0; i < g_skin_count; i++) {
+    for (int i = 0; g_localEnabled && i < g_skin_count; i++) {
         if ((is_knife_def(def) && is_knife_def(g_skins[i].def)) || g_skins[i].def == def) {
             selected = g_skins[i].cfg; target = g_skins[i].def;
             if (!is_knife_def(def)) break;
@@ -450,7 +452,7 @@ static void ApplyLocalSkins(uintptr_t client) {
     }
     ReleaseSRWLockShared(&g_lock);
     WeaponBinding* binding = FindWeaponBinding(client,handle,entity);
-    int inherited = binding && binding->donor != player &&
+    int inherited = g_shareEnabled && binding && binding->donor != player &&
         (binding->target == def || (is_knife_def(binding->target) && is_knife_def(def)));
     if (inherited) { selected = binding->cfg; target = binding->target; }
     if (!target || is_glove_def(target) || !g_setAttr || !g_updateSkin || !g_setMask ||
@@ -470,6 +472,7 @@ static void ApplyLocalSkins(uintptr_t client) {
         c->cfg.meshMask != cfg->meshMask || !str_eq(c->cfg.model,cfg->model);
     int recreated = c->scene != scene || c->hudHandle != hudHandle || c->attachment != attachment || c->hudChild != hudChild;
     uint64_t tick = GetTickCount64();
+    if (!RendererSessionCurrent(client)) return;
     RepairSkinFields(entity,cfg,target);
     int presentationWrong = KnifePresentationWrong(entity,cfg,target);
     int wrong = SkinAttributesWrong(entity,cfg) || presentationWrong;
@@ -502,23 +505,32 @@ static void ApplyLocalSkins(uintptr_t client) {
 }
 
 static void ApplyRemoteSkins(uintptr_t client) {
+    if (!g_shareEnabled || !RendererSessionCurrent(client)) {
+        memset(g_remoteCache,0,sizeof(g_remoteCache));
+        return; // no restoration writes when disabled/disconnected
+    }
     ReadRemoteConfig();
     uint64_t now = remote_now_ms();
     int count = g_remoteCount;
     int sessionValid = 1;
     if (now > g_remoteDeadline || g_remoteDeadline > now+10000 ||
-        *(uintptr_t*)(client+OFF_DW_GAMERULES) != g_remoteRules) sessionValid = 0;
+        ReadRoot(client+OFF_DW_GAMERULES) != g_remoteRules) sessionValid = 0;
     // Verify the file belongs to this local player and this live session.
-    uintptr_t localPawn = *(uintptr_t*)(client+OFF_DW_LOCAL_PLAYER_PAWN);
+    uintptr_t localPawn = ReadRoot(client+OFF_DW_LOCAL_PLAYER_PAWN);
     uintptr_t localController = remote_readable(localPawn,R_CONTROLLER+4) ?
         ResolveEntity(client,*(uint32_t*)(localPawn+R_CONTROLLER)) : 0;
     if (!remote_readable(localController,R_STEAMID+8) ||
         *(uint64_t*)(localController+R_STEAMID) != g_remoteLocal) sessionValid = 0;
     if (!g_setAttr || !g_updateSkin || !g_setModel || !g_setMask) sessionValid = 0;
-    if (!sessionValid) count = 0;
+    if (!sessionValid) {
+        memset(g_remoteCache,0,sizeof(g_remoteCache));
+        memset(g_bindings,0,sizeof(g_bindings));
+        return; // expiry/teardown is not a safe opportunity to restore entities
+    }
     for (int i = 0; i < REMOTE_CACHE_CAPACITY; i++) g_remoteCache[i].wanted = 0;
     int budget = 4;
     for (int i = 0; i < count; i++) {
+        if (!RendererSessionCurrent(client)) return;
         RemoteEntry effective = g_remote[i];
         RemoteEntry* r = &effective;
         if (r->kind || is_glove_def(r->target)) continue;

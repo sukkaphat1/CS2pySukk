@@ -466,9 +466,22 @@ static void ReadConfig() {
 
 // ---- entity resolution --------------------------------------------------
 
+// Copy root globals through the OS: unlike a probe followed by dereference,
+// this cannot fault this thread if the module disappears during the read.
+template<typename T> static int ReadValue(uintptr_t address, T* value) {
+    SIZE_T copied = 0;
+    *value = T();
+    return address >= 0x10000 && ReadProcessMemory(GetCurrentProcess(),
+        (LPCVOID)address,value,sizeof(T),&copied) && copied == sizeof(T);
+}
+static uintptr_t ReadRoot(uintptr_t address) {
+    uintptr_t value = 0;
+    return ReadValue(address,&value) ? value : 0;
+}
+
 static uintptr_t ResolveEntity(uintptr_t client, uint32_t handle) {
     if (!handle || handle == 0xFFFFFFFFu) return 0;
-    uintptr_t entityList = *(uintptr_t*)(client + OFF_DW_ENTITY_LIST);
+    uintptr_t entityList = ReadRoot(client+OFF_DW_ENTITY_LIST);
     if (!entityList || !safe_ptr(entityList)) return 0;
     uintptr_t listSlot = entityList + 0x8 * ((handle & 0x7FFF) >> 9) + 0x10;
     if (IsBadReadPtr((void*)listSlot,8)) return 0;
@@ -651,37 +664,59 @@ static void ApplyKnifePresentation(uintptr_t client, uintptr_t pawn, uintptr_t w
 static void ApplyGloveSkin(uintptr_t, const SkinCfg*, uint16_t) {}
 static void ApplyGloves(uintptr_t, uintptr_t) {}
 
+static int g_localEnabled = 0, g_shareEnabled = 0;
+static int RendererSessionCurrent(uintptr_t client);
 #include "skinshare_remote.h"
+#include "skin_lifecycle.h"
 
 // ---- main loop ----------------------------------------------------------
 
 static void Loop() {
-    uintptr_t client = (uintptr_t)GetModuleHandleA("client.dll");
-    if (!client) {
-        DllLog("loop: client.dll not found, aborting");
-        return;
-    }
-    DllLog("loop: client.dll base=%p", (void*)client);
-    DllLog("skin-share renderer: version=5 per-weapon settling and stable switch caches; gloves disabled");
-    ResolveFunctions();
-    DllLog("loop: entering main loop, skins=%d", g_skin_count);
-
-    uintptr_t lastRules = 0, lastList = 0;
+    DllLog("skin-share renderer: version=6 explicit disable, expiring permission and teardown guards; gloves disabled");
+    uintptr_t resolvedClient = 0, lastRules = 0, lastList = 0;
+    int lastLocal = 0, lastShared = 0;
     while (true) {
-        ReadConfig();
-        uintptr_t rules = *(uintptr_t*)(client+OFF_DW_GAMERULES);
-        uintptr_t list = *(uintptr_t*)(client+OFF_DW_ENTITY_LIST);
-        if (!rules || rules != lastRules || list != lastList) {
-            // Never dereference pointers cached from a previous map.
-            memset(g_remoteCache,0,sizeof(g_remoteCache));
-            memset(g_localSkins,0,sizeof(g_localSkins));
-            BindingSession(client);
+        ReadControl();
+        if (!g_localEnabled && !g_shareEnabled) {
+            if (lastLocal || lastShared) ClearRendererCaches();
+            lastLocal = lastShared = 0;
+            Sleep(250);
+            continue;
+        }
+        // Hold loader references ONLY for this pass. Do not use a cached module
+        // pointer after unload. This protects module lifetime, NOT entity lifetime.
+        HMODULE clientModule = 0, engineModule = 0;
+        int modules = GetModuleHandleExA(0,"client.dll",&clientModule) &&
+            GetModuleHandleExA(0,"engine2.dll",&engineModule);
+        uintptr_t client = (uintptr_t)clientModule;
+        g_liveEngine = (uintptr_t)engineModule;
+        if (modules && RendererSessionCurrent(client)) {
+            uintptr_t rules = ReadRoot(client+OFF_DW_GAMERULES);
+            uintptr_t list = ReadRoot(client+OFF_DW_ENTITY_LIST);
+            if (rules != lastRules || list != lastList ||
+                g_localEnabled != lastLocal || g_shareEnabled != lastShared) {
+                ClearRendererCaches();
+            }
             lastRules = rules; lastList = list;
+            lastLocal = g_localEnabled; lastShared = g_shareEnabled;
+            if (client != resolvedClient) {
+                g_setAttr = 0; g_updateSkin = 0; g_updateComp = 0; g_updateCompSet = 0;
+                g_setMask = 0; g_setModel = 0; g_updateSubclass = 0; g_updateWeaponVm = 0;
+                ResolveFunctions();
+                resolvedClient = client;
+            }
+            ReadConfig();
+            // Recheck after file I/O/pattern resolution; state may have changed.
+            if (RendererSessionCurrent(client)) ApplyLocalSkins(client);
+            if (RendererSessionCurrent(client)) ApplyRemoteSkins(client);
+        } else {
+            ClearRendererCaches();
+            resolvedClient = lastRules = lastList = 0;
+            lastLocal = lastShared = 0;
         }
-        if (rules) {
-            ApplyLocalSkins(client);
-            ApplyRemoteSkins(client);
-        }
+        g_liveEngine = 0;
+        if (engineModule) FreeLibrary(engineModule);
+        if (clientModule) FreeLibrary(clientModule);
         Sleep(250);
     }
 }

@@ -93,6 +93,8 @@ def ResolveBoneToID(selectedIndex):
 
 _last_update_time = time.perf_counter()
 def Aimbot_Update(processHandle, clientBaseAddress, Offsets, Options, ARDUINO_HANDLE):
+	if not Options.get("EnableAimbot", False):
+		return
 	m_flIntervalPerTick = 0.015625
 	global _last_update_time
 	try:

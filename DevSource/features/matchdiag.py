@@ -424,12 +424,14 @@ class MatchDiagnostics:
                 offsets,
             )
             map_name = _read_map_name(process_handle, client_base_address, offsets)
+            # Do not traverse stale player entities once engine teardown starts.
+            live = sign_on_state == SIGNON_FULL and game_rules and local_controller and local_pawn
             players = self._read_players(
                 process_handle,
                 client_base_address,
                 offsets,
                 max_clients,
-            )
+            ) if live else []
             fingerprint = _candidate_match_fingerprint(
                 map_name,
                 local_steam_id,

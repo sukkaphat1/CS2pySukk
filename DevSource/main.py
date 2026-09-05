@@ -27,6 +27,7 @@ import serial.tools.list_ports
 import win32con, win32process, win32api
 import keyboard, os, json
 import time
+from types import SimpleNamespace
 
 keyboard.add_hotkey("end", callback=lambda: os._exit(0))
 keyboard.add_hotkey("home", callback=lambda: gui_util.streamproof_toggle())
@@ -133,6 +134,7 @@ if __name__ == "__main__":
 	width, height = esp.pme.get_screen_width(), esp.pme.get_screen_height()
 
 	FOV_proc = multiprocessing.Process(target=fovchanger.FovChangerThreadFunction, args=(SharedOptions, SharedOffsets,))
+	FOV_proc.daemon = True
 	FOV_proc.start()
 
 	SharedBombState = Manager.Namespace()
@@ -148,40 +150,46 @@ if __name__ == "__main__":
 
 	while esp.pme.overlay_loop():
 		menu.update()
+		# Avoid serializing the full offset object for every field/player.
+		FrameOffsets = SimpleNamespace(offset=SharedOffsets.offset)
+		FrameOffsets.offset._engine_base = EngineModuleAddress or 0
+		FrameOptions = dict(SharedOptions.items())
 
 		if menu.is_open():
 			esp.pme.begin_drawing()
 			menu.draw(ProcessObject, ClientModuleAddress, SharedOptions, SharedOffsets)
 			esp.pme.end_drawing()
 		else:
-			esp.ESP_Update(ProcessObject, ClientModuleAddress, SharedOptions, SharedOffsets, SharedBombState)
+			esp.ESP_Update(ProcessObject, ClientModuleAddress, FrameOptions, FrameOffsets, SharedBombState)
 
-		if SharedOptions["EnableAimbot"] and win32api.GetAsyncKeyState(SharedOptions["AimbotKey"]) & 0x8000:
-			aimbot.Aimbot_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions, ARDUINO_HANDLE=ARDUINO_HANDLE)
+		if FrameOptions["EnableAimbot"] and win32api.GetAsyncKeyState(FrameOptions["AimbotKey"]) & 0x8000:
+			aimbot.Aimbot_Update(ProcessObject, ClientModuleAddress, FrameOffsets, FrameOptions, ARDUINO_HANDLE=ARDUINO_HANDLE)
 
-		if SharedOptions["EnableBhop"]:
-			bhop.Bhop_Update(ProcessObject, ClientModuleAddress, SharedOffsets)
+		if FrameOptions["EnableBhop"]:
+			bhop.Bhop_Update(ProcessObject, ClientModuleAddress, FrameOffsets, FrameOptions)
 
-		if SharedOptions.get("EnableRadarHack", False):
-			radar.RadarHack_Update(ProcessObject, ClientModuleAddress, SharedOffsets)
+		radar.RadarHack_Update(ProcessObject, ClientModuleAddress, FrameOffsets, FrameOptions)
 
 		try:
 			if EngineModuleAddress is None:
 				EngineModuleAddress = memfuncs.GetModuleBase(modulename="engine2.dll", process_object=ProcessObject)
-			match_snapshot = MatchDiagnostics.update(ProcessObject, ClientModuleAddress, EngineModuleAddress, SharedOffsets.offset)
+			match_snapshot = MatchDiagnostics.update(ProcessObject, ClientModuleAddress, EngineModuleAddress, FrameOffsets.offset)
 		except Exception as e:
 			match_snapshot = None
 			print(f"[match-diagnostics] error: {e}")
 
 		try:
-			SkinShareClient.update(match_snapshot, SharedOptions)
+			SkinShareClient.update(match_snapshot, FrameOptions)
 		except Exception as e:
 			print(f"[skin-share] error: {e}")
 
 		try:
-			skinchanger.SkinChanger_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions)
+			skinchanger.SkinChanger_Update(ProcessObject, ClientModuleAddress, FrameOffsets, FrameOptions)
 		except Exception as e:
 			print(f"[skin-changer] error: {e}")
 
-		combined.Triggerbot_AntiFlash_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions)
-		rcs.RecoilControl_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions, ARDUINO_HANDLE)
+		previous_weapon = FrameOptions.get("CurrentWeapon")
+		combined.Triggerbot_AntiFlash_Update(ProcessObject, ClientModuleAddress, FrameOffsets, FrameOptions)
+		if FrameOptions.get("CurrentWeapon") != previous_weapon:
+			SharedOptions["CurrentWeapon"] = FrameOptions["CurrentWeapon"]
+		rcs.RecoilControl_Update(ProcessObject, ClientModuleAddress, FrameOffsets, FrameOptions, ARDUINO_HANDLE)

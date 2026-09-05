@@ -6,6 +6,7 @@ import globals
 import win32api, win32gui
 import pyMeow as pme
 import time
+import struct
 import concurrent.futures
 from features import grenade
 
@@ -36,13 +37,22 @@ def draw_tracer(pme, start_x, start_y, end_x, end_y, color, thickness=1.5):
 		pme.draw_line(start_x, start_y, end_x, end_y, color=pme.get_color(color), thick=thickness)
 
 def draw_skeleton(pme, bones, bone_connections, color):
+	color = pme.get_color(color)
 	for start_bone, end_bone in bone_connections:
 		if start_bone in bones and end_bone in bones:
 			start = bones[start_bone]
 			end = bones[end_bone]
 			offset_x = (end.x - start.x)
 			offset_y = (end.y - start.y)
-			pme.draw_line(start.x + offset_x, start.y + offset_y, end.x - offset_x, end.y - offset_y, color=pme.get_color(color), thick=1)
+			if start.x >= 0 and start.y >= 0 and end.x >= 0 and end.y >= 0:
+				pme.draw_line(start.x + offset_x, start.y + offset_y, end.x - offset_x, end.y - offset_y, color=color, thick=1)
+
+
+def read_bones(process, address):
+	# One coherent read instead of 17 individual cross-process reads.
+	raw = memfuncs.ProcMemHandler.ReadBytes(process, address, max(PLAYER_BONES.values()) * 32 + 12)
+	return {name: Vector3(*struct.unpack_from('<fff', raw, index * 32))
+		for name, index in PLAYER_BONES.items()}
 
 def draw_box(pme, rect_left, rect_top, rect_width, rect_height, color):
 	pme.draw_rectangle_lines(rect_left, rect_top, rect_width, rect_height, color=pme.get_color(color), lineThick=1.0)
@@ -50,25 +60,32 @@ def draw_box(pme, rect_left, rect_top, rect_width, rect_height, color):
 
 def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombState):
 	if win32gui.GetWindowText(win32gui.GetForegroundWindow()) != "Counter-Strike 2":
+			pme.begin_drawing()
 			pme.end_drawing()
 			return
 
 	try:
 		localPlayerEnt_pawnAddress = memfuncs.ProcMemHandler.ReadPointer(processHandle, clientBaseAddress + Offsets.offset.dwLocalPlayerPawn)
 		localPlayerEnt_controllerAddress = memfuncs.ProcMemHandler.ReadPointer(processHandle, clientBaseAddress + Offsets.offset.dwLocalPlayerController)
+		if not localPlayerEnt_pawnAddress or not localPlayerEnt_controllerAddress:
+			pme.begin_drawing()
+			pme.end_drawing()
+			return
 		localPlayerEnt_Team = memfuncs.ProcMemHandler.ReadInt(processHandle, localPlayerEnt_pawnAddress + Offsets.offset.m_iTeamNum)
 		localPlayerEnt_origin = memfuncs.ProcMemHandler.ReadVec(processHandle, localPlayerEnt_pawnAddress + Offsets.offset.m_vOldOrigin)
 
 		viewMatrix = memfuncs.ProcMemHandler.ReadMatrix(processHandle, clientBaseAddress + Offsets.offset.dwViewMatrix)
 		EntityList = memfuncs.ProcMemHandler.ReadPointer(processHandle, clientBaseAddress + Offsets.offset.dwEntityList)
-	except:
-		pass
+	except Exception:
+		pme.begin_drawing()
+		pme.end_drawing()
+		return
 
 	pme.begin_drawing()
 
-	for i in range(64):
+	for i in range(1, 65):
 		try:
-			ListEntry = memfuncs.ProcMemHandler.ReadPointer(processHandle, EntityList + (8 * (i & 0x7FFF) >> 9) + 16)
+			ListEntry = memfuncs.ProcMemHandler.ReadPointer(processHandle, EntityList + 8 * ((i & 0x7FFF) >> 9) + 16)
 			if not ListEntry:
 				continue
 
@@ -90,9 +107,9 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
 
 			health = memfuncs.ProcMemHandler.ReadInt(processHandle, pawn + Offsets.offset.m_iHealth)
 			team = memfuncs.ProcMemHandler.ReadInt(processHandle, controller + Offsets.offset.m_iTeamNum)
-			lifeState = memfuncs.ProcMemHandler.ReadInt(processHandle, pawn + Offsets.offset.m_lifeState)
+			lifeState = memfuncs.ProcMemHandler.ReadBytes(processHandle, pawn + Offsets.offset.m_lifeState, 1)
 
-			if lifeState != 256 or (Options["EnableESPTeamCheck"] and team == localPlayerEnt_Team):
+			if health <= 0 or lifeState != b'\x00' or (Options["EnableESPTeamCheck"] and team == localPlayerEnt_Team):
 				continue
 
 			sceneNode = memfuncs.ProcMemHandler.ReadPointer(processHandle, pawn + Offsets.offset.m_pGameSceneNode)
@@ -144,8 +161,7 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
 					continue
 
 				bones = {}
-				for bone_name, bone_index in PLAYER_BONES.items():
-					bone_pos = memfuncs.ProcMemHandler.ReadVec(processHandle, bone_array + bone_index * 32)
+				for bone_name, bone_pos in read_bones(processHandle, bone_array).items():
 					bones[bone_name] = calculations.world_to_screen(viewMatrix, bone_pos)
 
 				draw_skeleton(pme, bones, boneConnections, color=color)
