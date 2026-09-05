@@ -73,7 +73,7 @@ def _skin_record(database, item_name, skin):
     if not isinstance(skin, dict):
         return None
     weapon = (database or {}).get("weapons", {}).get(item_name)
-    if not weapon:
+    if not weapon or weapon.get("category") == "gloves":
         return None
     try:
         target_def = int(weapon["def_index"])

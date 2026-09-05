@@ -35,6 +35,9 @@ class MappingTests(unittest.TestCase):
         for name, item in DB["weapons"].items():
             with self.subTest(name=name):
                 self.state["loadout"] = [selection(name, next(iter(item["skins"]),0))]
+                if item["category"] == "gloves":
+                    self.assertEqual(self.records(),[])
+                    continue
                 self.snapshot["players"][0]["active_def"] = 42 if item["category"] == "knives" else item["def_index"]
                 r = self.records()
                 self.assertEqual(len(r),1)
@@ -83,10 +86,18 @@ class MappingTests(unittest.TestCase):
                                  selection("sporty_gloves")]
         self.snapshot["players"][0]["active_def"] = 59
         r = self.records()
-        self.assertEqual([v["target"] for v in r],[515,5030])
-        self.assertEqual([v["handle"] for v in r],[0x80c8,0])
+        self.assertEqual([v["target"] for v in r],[515])
+        self.assertEqual([v["handle"] for v in r],[0x80c8])
         self.snapshot["players"][0]["active_def"] = None
-        self.assertEqual([v["target"] for v in self.records()],[5030])
+        self.assertEqual(self.records(),[])
+
+    def test_saved_glove_selections_are_not_broadcast(self):
+        self.snapshot["players"].append(dict(steam_id=int(LOCAL),active_def=42))
+        options = {"SkinChanger":{"enabled":True,"weapons":{
+            "weapon_bayonet":{"paint_kit":568}, "sporty_gloves":{"paint_kit":10018}}}}
+        with patch.object(skinshare.items,"get_database",return_value=DB):
+            payload = skinshare.build_local_payload(self.snapshot,options)
+        self.assertEqual([r['item_key'] for r in payload['loadout']],["weapon_bayonet"])
 
     def test_respawn_uses_fresh_receiver_handles(self):
         self.state["pawn_handle"] = 12

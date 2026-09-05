@@ -31,7 +31,7 @@ def resolve_selection(record, database):
     if not isinstance(record, dict):
         return None
     item = database.get("weapons", {}).get(record.get("item_key"))
-    if not item:
+    if not item or item.get("category") == "gloves":
         return None
     try:
         target = int(record["target_def"])
@@ -61,7 +61,7 @@ def resolve_selection(record, database):
 
 
 def build_render_records(snapshot, states, database, now=None):
-    """At most one active weapon and one glove instruction per live player."""
+    """At most one supported active weapon instruction per live player."""
     now = time.monotonic() if now is None else now
     if not snapshot or snapshot.get("phase") != "LIVE" or not snapshot.get("settled_fingerprint"):
         return []
@@ -91,22 +91,18 @@ def build_render_records(snapshot, states, database, now=None):
             continue
         selections = [s for r in raw_records if (s := resolve_selection(r, database))]
         active_def = player.get("active_def")
-        weapon = glove = None
+        weapon = None
         for selection in selections:
             category = selection["category"]
-            if category == "gloves":
-                glove = selection
-            elif isinstance(active_def, int):
+            if isinstance(active_def, int):
                 if (category == "knives" and is_knife(active_def)) or (
                     category != "knives" and selection["target"] == active_def
                 ):
                     weapon = selection
-        for kind, selection in ((0, weapon), (1, glove)):
-            if selection is None or (kind == 0 and handle in (0, 0xffffffff)):
-                continue
-            result.append(dict(selection, player_id=player_id, slot=player["slot"],
-                               pawn=pawn, handle=handle if kind == 0 else 0,
-                               source=active_def if kind == 0 else 0, kind=kind))
+        if weapon is None or handle in (0, 0xffffffff):
+            continue
+        result.append(dict(weapon, player_id=player_id, slot=player["slot"],
+                           pawn=pawn, handle=handle, source=active_def, kind=0))
     return result[:128]
 
 

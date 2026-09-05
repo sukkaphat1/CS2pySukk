@@ -120,6 +120,9 @@ def apply_skin(processHandle, weapon, Offsets, paint_kit, seed=0, wear=0.0, stat
     """
     o = Offsets.offset
 
+    if def_index is not None and (4725 == int(def_index) or 5027 <= int(def_index) <= 5035):
+        return
+
     # C_AttributeContainer (m_AttributeManager) and C_EconItemView (m_Item) are
     # inline objects, so add their offsets directly to reach the item view.
     item_view = weapon + o.m_AttributeManager + o.m_Item
@@ -316,6 +319,8 @@ def _write_skin_config(Options):
             if not w:
                 print(f"[skin-changer] write: unknown weapon {name}")
                 continue
+            if w.get("category") == "gloves":
+                continue
             pk = db["paint_kits"].get(int(skin.get("paint_kit", 0))) or {}
             mesh_mask = 2 if pk.get("legacy") else 1
             model = w.get("model") or "-"
@@ -361,24 +366,5 @@ def SkinChanger_Update(processHandle, clientBaseAddress, Offsets, Options):
 
 
 def _apply_gloves(processHandle, clientBaseAddress, Offsets, cfg):
-    glove = get_glove_entity(processHandle, clientBaseAddress, Offsets)
-    if not glove:
-        return
-    def_index = get_active_weapon_def(processHandle, clientBaseAddress, Offsets, glove)
-    name = weapon_name_from_def(def_index)
-    if not name:
-        return
-    skin = (cfg.get("weapons", {}) or {}).get(name)
-    if not skin:
-        return
-    apply_skin(
-        processHandle,
-        glove,
-        Offsets,
-        paint_kit=int(skin.get("paint_kit", 0)),
-        seed=int(skin.get("seed", 0)),
-        wear=float(skin.get("wear", 0.0)),
-        stat_trak=int(skin.get("stat_trak", -1)),
-        def_index=int(skin.get("def_index", def_index)),
-        quality=int(skin.get("quality", 0)),
-    )
+    """Glove replacement is disabled, including previously saved selections."""
+    return

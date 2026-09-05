@@ -84,7 +84,7 @@ def update():
 
 
 def _weapons_in_category(db, cat_key):
-    return [w for w in db["weapons"].values() if w["category"] == cat_key]
+    return [w for w in db["weapons"].values() if w["category"] == cat_key and w["category"] != "gloves"]
 
 
 def _skins_for_weapon(db, weapon):
@@ -122,9 +122,14 @@ def _draw_skins_tab(proc, clientBase, Options, Offsets):
         pme.gui_label(COLS_X[0], COLS_Y, 300, 20, "Item database unavailable")
         return
 
-    categories = db["categories"]
+    categories = [cat for cat in db["categories"] if cat["key"] != "gloves"]
+    if not categories:
+        return
+    _sel_category = min(_sel_category, len(categories) - 1)
     weapons = _weapons_in_category(db, categories[_sel_category]["key"])
+    _sel_weapon = min(_sel_weapon, max(0, len(weapons) - 1))
     skins = _skins_for_weapon(db, weapons[_sel_weapon]) if weapons else []
+    _sel_skin = min(_sel_skin, max(0, len(skins) - 1))
 
     # --- enable toggle ---
     cfg = Options.get("SkinChanger", {}) or {}
@@ -217,6 +222,8 @@ def _draw_skins_tab(proc, clientBase, Options, Offsets):
 
 def _apply_selection(Options, weapon, skin, seed=1, wear=0.0):
     """Persist the chosen paint kit for this weapon into the config."""
+    if weapon.get("category") == "gloves":
+        return
     quality = 3 if weapon["category"] == "knives" else 0
     cfg = dict(Options.get("SkinChanger", {}) or {})
     weapons = dict(cfg.get("weapons", {}) or {})
@@ -246,6 +253,8 @@ def _apply_selection(Options, weapon, skin, seed=1, wear=0.0):
 
 def _apply_now(proc, clientBase, Offsets, weapon, skin):
     """Immediately apply the skin to the currently held weapon if it matches."""
+    if weapon.get("category") == "gloves":
+        return
     try:
         cur = skinchanger.get_active_weapon(proc, clientBase, Offsets)
         if not cur:

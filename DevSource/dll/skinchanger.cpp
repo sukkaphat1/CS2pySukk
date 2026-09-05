@@ -448,7 +448,7 @@ static void ReadConfig() {
         if (!parse_i32(&s, end, &mesh)) break;
         parse_token(&s, end, model, sizeof(model));
         if (model[0] == '-' && model[1] == 0) model[0] = 0;
-        if (g_skin_count < 64) {
+        if (g_skin_count < 64 && !is_glove_def((uint16_t)def)) {
             g_skins[g_skin_count].def = (uint16_t)def;
             g_skins[g_skin_count].cfg.paint = paint;
             g_skins[g_skin_count].cfg.seed = seed;
@@ -474,7 +474,8 @@ static uintptr_t ResolveEntity(uintptr_t client, uint32_t handle) {
 
 // ---- skin application ---------------------------------------------------
 
-static void PokeFields(uintptr_t weapon, const SkinCfg* cfg, uint16_t defIndex) {
+static void PokeFields(uintptr_t weapon, const SkinCfg* cfg, uint16_t defIndex, bool preserveOwner = false) {
+    if (is_glove_def(defIndex)) return;
     // Cheap direct memory writes only (no game function calls). Safe to run
     // every tick to resist the game resetting the fallback fields.
     uintptr_t itemView = weapon + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM;
@@ -490,17 +491,18 @@ static void PokeFields(uintptr_t weapon, const SkinCfg* cfg, uint16_t defIndex) 
     *(uint32_t*)(itemView + OFF_M_ITEMIDLOW) = 0;
     *(uint64_t*)(itemView + OFF_M_ITEMID) = 0xFFFFFFFF00000000ull;
 
-    *(uint32_t*)(weapon + OFF_M_OWNERXUIDLOW) = accountId;
-    *(uint32_t*)(weapon + OFF_M_OWNERXUIDHIGH) = 0;
+    if (!preserveOwner) {
+        *(uint32_t*)(weapon + OFF_M_OWNERXUIDLOW) = accountId;
+        *(uint32_t*)(weapon + OFF_M_OWNERXUIDHIGH) = 0;
+    }
     *(int32_t*)(weapon + OFF_M_FALLBACKPAINTKIT) = cfg->paint;
     *(int32_t*)(weapon + OFF_M_FALLBACKSEED) = cfg->seed;
     *(float*)(weapon + OFF_M_FALLBACKWEAR) = cfg->wear;
     *(int32_t*)(weapon + OFF_M_FALLBACKSTATTRAK) = -1;
 }
 
-static void ApplySkin(uintptr_t weapon, const SkinCfg* cfg, uint16_t defIndex) {
+static void RefreshWeaponMaterials(uintptr_t weapon, const SkinCfg* cfg) {
     uintptr_t itemView = weapon + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM;
-    PokeFields(weapon, cfg, defIndex);
 
     // Mesh group mask via the game's own setter (does the mesh refresh).
     if (g_setMask) {
@@ -525,25 +527,34 @@ static void ApplySkin(uintptr_t weapon, const SkinCfg* cfg, uint16_t defIndex) {
     }
 }
 
-static void ApplyViewmodelMask(uintptr_t client, uintptr_t pawn, int meshMask) {
+static void ApplySkin(uintptr_t weapon, const SkinCfg* cfg, uint16_t defIndex) {
+    if (is_glove_def(defIndex)) return;
+    PokeFields(weapon,cfg,defIndex);
+    RefreshWeaponMaterials(weapon,cfg);
+}
+
+static int ApplyViewmodelMask(uintptr_t client, uintptr_t pawn, int meshMask, bool onlyChanged = false) {
     // The first-person viewmodel (hud arms + weapon) is what the user sees.
     // Its scene node children carry the mesh group masks; set them so only the
     // painted group renders (legacy=2, normal=1) instead of all groups.
     uint32_t armsHandle = *(uint32_t*)(pawn + OFF_M_HHUDMODELARMS);
     uintptr_t arms = ResolveEntity(client, armsHandle);
-    if (!arms) return;
+    if (!arms || !safe_ptr(arms) || IsBadReadPtr((void*)arms,OFF_M_PGAMESCENENODE+8)) return 0;
     uintptr_t sceneNode = *(uintptr_t*)(arms + OFF_M_PGAMESCENENODE);
-    if (!sceneNode) return;
+    if (!sceneNode || !safe_ptr(sceneNode) || IsBadReadPtr((void*)sceneNode,80)) return 0;
     uintptr_t child = *(uintptr_t*)(sceneNode + 64);  // m_pChild
     int guard = 0;
+    int repaired = 0;
     while (child && guard++ < 16) {
-        if (!safe_ptr(child)) break;
-        if (g_setMask)
-            g_setMask((void*)child, (uint64_t)meshMask);
-        else
-            *(uint64_t*)(child + OFF_M_MODELSTATE + OFF_M_MESHGROUPMASK) = (uint64_t)meshMask;
+        if (!safe_ptr(child) || IsBadReadPtr((void*)child,OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK+8)) break;
+        if (!onlyChanged || *(uint64_t*)(child+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) != (uint64_t)meshMask) {
+            if (g_setMask) g_setMask((void*)child,(uint64_t)meshMask);
+            else *(uint64_t*)(child+OFF_M_MODELSTATE+OFF_M_MESHGROUPMASK) = (uint64_t)meshMask;
+            repaired++;
+        }
         child = *(uintptr_t*)(child + 72);  // m_pNextSibling
     }
+    return repaired;
 }
 
 // Set the model on the first-person KNIFE viewmodel entity (the HUD arms
@@ -555,17 +566,17 @@ static void SetKnifeHudViewModel(uintptr_t client, uintptr_t pawn, const char* m
     if (!model || !model[0] || !g_setModel) return;
     uint32_t armsHandle = *(uint32_t*)(pawn + OFF_M_HHUDMODELARMS);
     uintptr_t arms = ResolveEntity(client, armsHandle);
-    if (!arms || !safe_ptr(arms)) return;
+    if (!arms || !safe_ptr(arms) || IsBadReadPtr((void*)arms,OFF_M_PGAMESCENENODE+8)) return;
     uintptr_t sceneNode = *(uintptr_t*)(arms + OFF_M_PGAMESCENENODE);
-    if (!sceneNode || !safe_ptr(sceneNode)) return;
+    if (!sceneNode || !safe_ptr(sceneNode) || IsBadReadPtr((void*)sceneNode,80)) return;
     uintptr_t child = *(uintptr_t*)(sceneNode + 64);  // m_pChild
     int guard = 0;
     while (child && guard++ < 16) {
-        if (!safe_ptr(child)) break;
+        if (!safe_ptr(child) || IsBadReadPtr((void*)child,OFF_M_MODELSTATE+176)) break;
         // CModelState m_ModelName (CUtlString) at sceneNode + m_modelState(320)
         // + m_ModelName(168); its data pointer is the model path.
         const char* mn = (const char*)*(uintptr_t*)(child + OFF_M_MODELSTATE + 168);
-        if (mn && safe_ptr((uintptr_t)mn) && str_contains(mn, "knife")) {
+        if (mn && safe_ptr((uintptr_t)mn) && !IsBadReadPtr((void*)mn,320) && str_contains(mn, "knife")) {
             uintptr_t owner = *(uintptr_t*)(child + 48);  // m_pOwner -> C_BaseEntity
             if (owner && safe_ptr(owner)) {
                 g_setModel((void*)owner, model);
@@ -614,130 +625,24 @@ static uint32_t MakeSubclassToken(uint16_t defIndex) {
     return h;
 }
 
+static void ApplyKnifePresentation(uintptr_t client, uintptr_t pawn, uintptr_t weapon,
+                                   const SkinCfg* cfg, uint16_t def) {
+    if (!is_knife_def(def) || !cfg->model[0] || !g_setModel) return;
+    g_setModel((void*)weapon,cfg->model);
+    SetKnifeHudViewModel(client,pawn,cfg->model);
+    *(uint32_t*)(weapon+896) = MakeSubclassToken(def);
+    if (g_updateSubclass) g_updateSubclass((void*)weapon);
+    // Ask the existing equipment attachment path to rebuild after the model
+    // and subclass agree. Never write guessed hand positions or bone offsets.
+    *(uint8_t*)(weapon+5816) = 1; // C_EconEntity::m_bAttachmentDirty
+    if (g_updateWeaponVm) g_updateWeaponVm((void*)weapon);
+}
+
 // ---- glove application --------------------------------------------------
 
-static void ApplyGloveSkin(uintptr_t entity, const SkinCfg* cfg, uint16_t defIndex) {
-    PokeFields(entity, cfg, defIndex);
-    uintptr_t itemView = entity + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM;
-    if (g_setAttr) {
-        g_setAttr((void*)itemView, "set item texture prefab", (float)cfg->paint);
-        g_setAttr((void*)itemView, "set item texture wear", cfg->wear);
-        g_setAttr((void*)itemView, "set item texture seed", (float)cfg->seed);
-    }
-    // NOTE: no UpdateSkin/UpdateCompositeMaterial here. Those are resolved to
-    // C_CSWeaponBase methods and would touch weapon-specific fields on a
-    // C_EconWearable (glove). The field + attribute writes above are enough.
-}
-
-// Find the glove wearable (C_EconWearable) via m_hMyWearables and apply the
-// configured glove skin, model-swapping when the glove type changes.
-static void ApplyGloves(uintptr_t client, uintptr_t pawn) {
-    static uintptr_t lastEntity = 0;
-    static uint16_t lastDef = 0;
-    static int lastPaint = -1;
-    static int lastSeed = -1;
-    static int lastMesh = -1;
-    static float lastWear = -1.0f;
-    static char lastModel[320];
-    static int haveLast = 0;
-    static int dbgDone = 0;
-    static uint64_t lastPokeTick = 0;
-
-    const SkinCfg* gc = 0;
-    uint16_t gd = 0;
-    for (int i = 0; i < g_skin_count; i++) {
-        if (is_glove_def(g_skins[i].def)) {
-            gc = &g_skins[i].cfg;
-            gd = g_skins[i].def;
-        }
-    }
-    if (!gc) { haveLast = 0; return; }
-
-    uintptr_t wearables = *(uintptr_t*)(pawn + OFF_M_HMYWEARABLES);
-    int32_t count = (wearables && safe_ptr(wearables)) ? *(int32_t*)(pawn + OFF_M_HMYWEARABLES + 8) : 0;
-
-    // One-time diagnostic: show the raw m_hMyWearables state so we can confirm
-    // the offset + CUtlVector layout are right on this build.
-    if (!dbgDone) {
-        dbgDone = 1;
-        DllLog("glove: cfg def=%u paint=%d wearables=%p count=%d", (unsigned)gd, gc->paint, (void*)wearables, count);
-        for (int i = 0; wearables && i < count && i < 16; i++) {
-            uint32_t h = *(uint32_t*)(wearables + (uintptr_t)i * 4);
-            uintptr_t e = ResolveEntity(client, h);
-            if (e && safe_ptr(e)) {
-                uint16_t d = *(uint16_t*)(e + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM + OFF_M_ITEMDEFINDEX);
-                DllLog("glove: wearable[%d] handle=0x%X entity=%p def=%u", i, h, (void*)e, (unsigned)d);
-            } else {
-                DllLog("glove: wearable[%d] handle=0x%X -> no entity", i, h);
-            }
-        }
-        if (!wearables) {
-            // m_hMyWearables is empty: scan the whole entity list for any glove
-            // entity so we can see where it actually lives on this build.
-            uintptr_t entityList = *(uintptr_t*)(client + OFF_DW_ENTITY_LIST);
-            if (entityList && safe_ptr(entityList)) {
-                int found = 0;
-                for (int chunk = 0; chunk < 64 && found < 8; chunk++) {
-                    uintptr_t le = *(uintptr_t*)(entityList + 0x8 * chunk + 0x10);
-                    if (!le || !safe_ptr(le)) continue;
-                    for (int i = 0; i < 512; i++) {
-                        uintptr_t e = *(uintptr_t*)(le + 0x70 * i);
-                        if (!e || !safe_ptr(e)) continue;
-                        uint16_t d = *(uint16_t*)(e + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM + OFF_M_ITEMDEFINDEX);
-                        if (is_glove_def(d)) {
-                            DllLog("glove: entitylist[%d][%d] def=%u at %p", chunk, i, (unsigned)d, (void*)e);
-                            found++;
-                        }
-                    }
-                }
-                if (!found) DllLog("glove: entity-list scan found no glove entity");
-            }
-        }
-    }
-
-    if (!wearables || !safe_ptr(wearables)) { haveLast = 0; return; }
-    if (count <= 0 || count > 16) { haveLast = 0; return; }
-
-    for (int i = 0; i < count; i++) {
-        uint32_t handle = *(uint32_t*)(wearables + (uintptr_t)i * 4);
-        uintptr_t entity = ResolveEntity(client, handle);
-        if (!entity || !safe_ptr(entity)) continue;
-        uintptr_t itemView = entity + OFF_M_ATTRIBUTEMANAGER + OFF_M_ITEM;
-        uint16_t def = *(uint16_t*)(itemView + OFF_M_ITEMDEFINDEX);
-        if (!is_glove_def(def)) continue;
-
-        int changed = !haveLast
-            || entity != lastEntity
-            || gd != lastDef
-            || gc->paint != lastPaint
-            || gc->seed != lastSeed
-            || gc->wear != lastWear
-            || gc->meshMask != lastMesh
-            || !str_eq(gc->model, lastModel);
-        uint64_t now = GetTickCount64();
-
-        if (changed) {
-            DllLog("glove: def=%u paint=%d seed=%d wear=%.3f mesh=%d model=%s entity=%p",
-                (unsigned)def, gc->paint, gc->seed, gc->wear, gc->meshMask, gc->model, (void*)entity);
-            ApplyGloveSkin(entity, gc, gd);
-            if (gc->model[0] && g_setModel) {
-                g_setModel((void*)entity, gc->model);
-            }
-            lastEntity = entity;
-            lastDef = gd;
-            lastPaint = gc->paint;
-            lastSeed = gc->seed;
-            lastWear = gc->wear;
-            lastMesh = gc->meshMask;
-            copy_str(lastModel, gc->model, (int)sizeof(lastModel));
-            haveLast = 1;
-            lastPokeTick = now;
-        } else if (now - lastPokeTick >= 2000) {
-            PokeFields(entity, gc, gd);
-            lastPokeTick = now;
-        }
-    }
-}
+// Compatibility no-ops: saved glove configs cannot cause any memory writes.
+static void ApplyGloveSkin(uintptr_t, const SkinCfg*, uint16_t) {}
+static void ApplyGloves(uintptr_t, uintptr_t) {}
 
 #include "skinshare_remote.h"
 
@@ -750,7 +655,7 @@ static void Loop() {
         return;
     }
     DllLog("loop: client.dll base=%p", (void*)client);
-    DllLog("skin-share renderer: version=2 material settling and mesh recovery enabled");
+    DllLog("skin-share renderer: version=3 shared local material path; gloves disabled");
     ResolveFunctions();
     DllLog("loop: entering main loop, skins=%d", g_skin_count);
 
@@ -845,13 +750,9 @@ static void Loop() {
                             // first-person viewmodel(s) + subclass id. The
                             // viewmodel model write is what was missing before
                             // and caused UpdateWeaponViewModel to corrupt state.
-                            g_setModel((void*)weapon, pick->model);
-                            SetKnifeHudViewModel(client, pawn, pick->model);
+                            ApplyKnifePresentation(client,pawn,weapon,pick,pickDef);
                             // Subclass id = murmur2(decimal def index) drives
                             // the knife animation class (butterfly flip).
-                            *(uint32_t*)(weapon + 896) = MakeSubclassToken(pickDef);  // m_nSubclassID
-                            if (g_updateSubclass) g_updateSubclass((void*)weapon);
-                            if (g_updateWeaponVm) g_updateWeaponVm((void*)weapon);
                         }
                         lastWeapon = weapon;
                         lastDef = pickDef;
@@ -870,11 +771,6 @@ static void Loop() {
                 ReleaseSRWLockShared(&g_lock);
             }
         }
-
-        // --- gloves (wearable entity, independent of the active weapon) ---
-        AcquireSRWLockShared(&g_lock);
-        ApplyGloves(client, pawn);
-        ReleaseSRWLockShared(&g_lock);
 
         ApplyRemoteSkins(client);
 
