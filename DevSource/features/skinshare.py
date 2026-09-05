@@ -408,6 +408,11 @@ class SkinShareClient:
             return
         message_type = message.get("type")
         if message_type == "welcome":
+            # A client process can restart its local sequence counter. The
+            # relay resets that player's room state on hello, so discard the
+            # cached remote sequences before replayed snapshots arrive.
+            with self._lock:
+                self._remote_states.clear()
             _log("relay welcome received")
             return
         if message_type == "error":

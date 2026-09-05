@@ -259,6 +259,11 @@ export class MatchRoom {
         }
       }
 
+      // A restarted client begins its local sequence counter at one. Remove
+      // the previous ephemeral record so the new session is not rejected as
+      // stale by the room's sequence check.
+      await this.state.storage.delete(`player:${playerId}`);
+
       attachment = {
         authenticated: true,
         player_id: playerId,
